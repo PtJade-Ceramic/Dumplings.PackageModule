@@ -154,7 +154,7 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
       $Result.AppsAndFeaturesEntries[0].Publisher | Should -Be 'New NSIS Publisher'
       $Result.AppsAndFeaturesEntries[0].ProductCode | Should -Be 'New.NSIS.Product'
       Should -Invoke Get-NSISInfo -Exactly 1
-      Should -Invoke Get-NSISInfo -Exactly 1 -ParameterFilter { $Architecture -eq 'x64' }
+      Should -Invoke Get-NSISInfo -Exactly 1 -ParameterFilter { $Architecture -eq 'x64' -and $FileSystemComplete }
       Should -Invoke Get-WinGetInstallerAnalysis -Exactly 0
     }
 

@@ -186,7 +186,13 @@ function Get-WinGetKnownInstallerManifestInfo {
         return [pscustomobject]@{ ParserName = 'Burn'; DetectedInstallerType = (& $InstallerTypeFor $Info); InputObject = @($Info); Diagnostics = (& $DiagnosticsFor $Info) }
       }
       'nullsoft' {
-        $Arguments = @{ Path = $Path }
+        # Manifest authoring models a fresh installation. Treating every
+        # unlisted target path as unknown needlessly explores upgrade-only
+        # IfFileExists branches and can multiply a large install section into
+        # many full execution states. Callers that need installed-state
+        # simulation can still use Get-NSISInfo directly with an explicit
+        # FileSystem and without FileSystemComplete.
+        $Arguments = @{ Path = $Path; FileSystemComplete = $true }
         if ($Architecture -in @('x86', 'x64', 'arm64')) { $Arguments.Architecture = $Architecture }
         if ($Scope -in @('user', 'machine')) { $Arguments.Scope = $Scope }
         if ($PSBoundParameters.ContainsKey('CommandLine')) { $Arguments.CommandLine = $CommandLine }

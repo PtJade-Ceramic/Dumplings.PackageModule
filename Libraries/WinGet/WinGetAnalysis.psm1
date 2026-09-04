@@ -157,6 +157,17 @@ function Get-WinGetInstallerFamilyTemplate {
         )
       }
     }
+    'Astrum InstallWizard' {
+      [pscustomobject]@{
+        InstallerType = 'exe'
+        Notes         = @(
+          'Use Get-AstrumInstallWizardInfo once for compiled registry, ARP, operation, payload, architecture, and dependency evidence.',
+          'Verified 2.x media uses /silent and reports exit code 1 as success. Exact parser evidence adds /AcceptLicense when required and removes silent mode when the standard User Information dialog is compiled.',
+          'Astrum 1.x requires builder-version or VM evidence because silent support was introduced during that generation.',
+          'Spanned media and tiny wrappers require a structurally verified route before extraction.'
+        )
+      }
+    }
     'Velopack' {
       [pscustomobject]@{
         InstallerType       = 'exe'
@@ -643,9 +654,9 @@ function Get-WinGetParserResultSuggestion {
     }
   }
 
-  $GenericBehaviorFamilies = @('Advanced Installer', 'InstallShield', 'InstallShield MSI Wrapper', 'InstallShield Advanced UI', 'Squirrel', 'Velopack', 'Zero Install', 'MicaSetup', 'Kachina', 'Setup Factory', 'InstallAnywhere', 'InstallAware', 'Actual Installer', 'DeployMaster', '7z SFX', 'WinRAR GUI SFX', 'InstallMate', 'QSetup', 'install4j', 'dotNetInstaller', 'IExpress', 'Wise', 'InstallBuilder', 'Paquet Builder', 'CreateInstall', 'InstallForge')
+  $GenericBehaviorFamilies = @('Advanced Installer', 'InstallShield', 'InstallShield MSI Wrapper', 'InstallShield Advanced UI', 'Squirrel', 'Velopack', 'Zero Install', 'MicaSetup', 'Kachina', 'Astrum InstallWizard', 'Setup Factory', 'InstallAnywhere', 'InstallAware', 'Actual Installer', 'DeployMaster', '7z SFX', 'WinRAR GUI SFX', 'InstallMate', 'QSetup', 'install4j', 'dotNetInstaller', 'IExpress', 'Wise', 'InstallBuilder', 'Paquet Builder', 'CreateInstall', 'InstallForge')
   if ($TemplateFamily -cin $GenericBehaviorFamilies -and $Metadata) {
-    foreach ($Field in @('InstallModes', 'InstallerSwitches', 'ElevationRequirement', 'UpgradeBehavior')) {
+    foreach ($Field in @('InstallModes', 'InstallerSwitches', 'InstallerSuccessCodes', 'ElevationRequirement', 'UpgradeBehavior')) {
       $Value = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name $Field
       if (Test-WinGetSuggestionValue -Value $Value) { $Fields[$Field] = Copy-WinGetManifestValue -Value $Value }
     }
@@ -684,6 +695,25 @@ function Get-WinGetParserResultSuggestion {
     }
     $RecommendedUpgradeBehavior = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name RecommendedUpgradeBehavior
     if ($RecommendedUpgradeBehavior) { $Fields['UpgradeBehavior'] = $RecommendedUpgradeBehavior }
+  }
+
+  if ($Family -ceq 'Astrum InstallWizard' -and $Metadata) {
+    $SupportsSilentInstallation = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name SupportsSilentInstallation
+    if ($SupportsSilentInstallation -eq $true) {
+      $Fields['InstallModes'] = @('interactive', 'silent')
+      $Fields['InstallerSwitches'] = Copy-WinGetManifestValue -Value (Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name InstallerSwitches)
+      $SuccessCodes = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name InstallerSuccessCodes
+      if (Test-WinGetSuggestionValue -Value $SuccessCodes) { $Fields['InstallerSuccessCodes'] = Copy-WinGetManifestValue -Value $SuccessCodes }
+    } elseif ($SupportsSilentInstallation -eq $false) {
+      $Fields['InstallModes'] = @('interactive')
+      $Fields.Remove('InstallerSwitches')
+      $NextSteps.Add('The compiled Astrum User Information dialog prevents /silent from completing; treat this artifact as interactive-only.')
+    } else {
+      $Fields.Remove('InstallModes')
+      $Fields.Remove('InstallerSwitches')
+      $Fields.Remove('InstallerSuccessCodes')
+      $NextSteps.Add('Determine the Astrum 1.x builder subversion or validate /silent and the success exit code in a VM before adding unattended-installation fields.')
+    }
   }
 
   if ($Family -ceq 'Chromium Setup' -and $Metadata) {

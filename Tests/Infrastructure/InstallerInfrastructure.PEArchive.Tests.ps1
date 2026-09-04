@@ -164,6 +164,29 @@ Describe 'Shared archive helpers' {
     } finally { $Output.Dispose(); $CompressedInput.Dispose() }
   }
 
+  It 'decodes bounded GZip members and rejects a corrupt trailer' {
+    $Expected = [Text.Encoding]::UTF8.GetBytes(('astrum-gzip-payload-' * 16))
+    $CompressedOutput = [IO.MemoryStream]::new()
+    $Encoder = [IO.Compression.GZipStream]::new($CompressedOutput, [IO.Compression.CompressionLevel]::Optimal, $true)
+    try { $Encoder.Write($Expected, 0, $Expected.Length) } finally { $Encoder.Dispose() }
+    $Compressed = $CompressedOutput.ToArray()
+    $CompressedOutput.Dispose()
+
+    $CompressedInput = [IO.MemoryStream]::new($Compressed, $false)
+    $Output = [IO.MemoryStream]::new()
+    try {
+      Expand-InstallerCompressedStream -Algorithm GZip -Stream $CompressedInput -Destination $Output -MaximumBytes 4096 -CompressedSize $Compressed.Length -UncompressedSize $Expected.Length | Should -Be $Expected.Length
+      $Output.ToArray() | Should -Be $Expected
+    } finally { $Output.Dispose(); $CompressedInput.Dispose() }
+
+    $Corrupt = [byte[]]$Compressed.Clone()
+    $Corrupt[$Corrupt.Length - 8] = $Corrupt[$Corrupt.Length - 8] -bxor 0xFF
+    $CompressedInput = [IO.MemoryStream]::new($Corrupt, $false)
+    $Output = [IO.MemoryStream]::new()
+    try { { Expand-InstallerCompressedStream -Algorithm GZip -Stream $CompressedInput -Destination $Output -MaximumBytes 4096 -CompressedSize $Corrupt.Length -UncompressedSize $Expected.Length } | Should -Throw }
+    finally { $Output.Dispose(); $CompressedInput.Dispose() }
+  }
+
   It 'opens and exports a bounded ZIP entry' {
     $ZipPath = Join-Path $Script:TemporaryRoot 'sample.zip'
     $SourcePath = Join-Path $Script:TemporaryRoot 'source.txt'

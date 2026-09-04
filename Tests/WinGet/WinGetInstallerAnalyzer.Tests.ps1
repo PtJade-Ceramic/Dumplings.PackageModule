@@ -453,6 +453,7 @@ Describe 'WinGet installer analyzer content detection' {
           Where-Object { $_.Name -eq 'NSIS' -and $_.Success })[0].Result
 
       @($ParserResult.AppsAndFeaturesEntries).Count | Should -Be 2
+      Should -Invoke Get-NSISInfo -Exactly 1 -ParameterFilter { $FileSystemComplete }
       $ParserResult.AppsAndFeaturesEntries.DisplayName | Should -Contain '腾讯会议'
       $ParserResult.AppsAndFeaturesEvidence.Locale | Should -Contain 'zh-CN'
       $ParserResult.HasLocalizedAppsAndFeaturesEntries | Should -BeTrue
@@ -678,12 +679,12 @@ Describe 'WinGet installer analyzer content detection' {
   It 'Should warn when a confirmed structural family fails metadata parsing' {
     InModuleScope InstallerAnalyzer {
       $Candidate = [pscustomobject]@{
-        Family                  = 'Inno Setup'
-        Confidence              = 'high'
-        EvidenceKind            = 'Structural'
-        ValidationStatus        = 'ConfirmedStructure'
-        IsOuterContainer        = $true
-        MatchedMarkers          = @('Inno Setup Setup Data')
+        Family           = 'Inno Setup'
+        Confidence       = 'high'
+        EvidenceKind     = 'Structural'
+        ValidationStatus = 'ConfirmedStructure'
+        IsOuterContainer = $true
+        MatchedMarkers   = @('Inno Setup Setup Data')
       }
       $ParserResult = [pscustomobject]@{
         Name        = 'Inno'

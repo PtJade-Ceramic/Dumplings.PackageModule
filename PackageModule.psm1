@@ -50,6 +50,7 @@ $ModulePaths = @(
   'Libraries\Installers\MSI.psm1'
   'Libraries\Installers\ActualInstaller.psm1'
   'Libraries\Installers\AdvancedInstaller.psm1'
+  'Libraries\Installers\AstrumInstallWizard.psm1'
   'Libraries\Installers\Burn.psm1'
   'Libraries\Installers\ChromiumUpdater.psm1'
   'Libraries\Installers\ChromiumMiniInstaller.psm1'
