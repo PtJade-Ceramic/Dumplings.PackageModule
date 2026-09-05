@@ -70,7 +70,7 @@ param (
   [string]$MatchPath,
   [uri]$InstallerUrl,
   [string]$InstallerPath,
-  [ValidateSet('x86', 'x64', 'arm64')][string[]]$Architecture,
+  [ValidateSet('x86', 'x64', 'arm', 'arm64')][string[]]$Architecture,
   [ValidateSet('user', 'machine')][string]$Scope,
   [string]$NestedInstallerFile,
   [Nullable[int]]$Index,

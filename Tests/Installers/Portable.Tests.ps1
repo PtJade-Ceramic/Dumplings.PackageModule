@@ -257,6 +257,7 @@ Describe 'PE architecture helpers' {
   It 'Should map native PE machine values to concrete WinGet architectures' {
     (Get-PEArchitectureInfo -Path (Get-PortableTestPEFixture -Name 'native-x86.exe' -Machine 0x014C)).RecommendedWinGetArchitecture | Should -Be 'x86'
     (Get-PEArchitectureInfo -Path (Get-PortableTestPEFixture -Name 'native-x64.exe' -Machine 0x8664 -PE32Plus)).RecommendedWinGetArchitecture | Should -Be 'x64'
+    (Get-PEArchitectureInfo -Path (Get-PortableTestPEFixture -Name 'native-arm.exe' -Machine 0x01C4)).RecommendedWinGetArchitecture | Should -Be 'arm'
     (Get-PEArchitectureInfo -Path (Get-PortableTestPEFixture -Name 'native-arm64.exe' -Machine 0xAA64 -PE32Plus)).RecommendedWinGetArchitecture | Should -Be 'arm64'
   }
 
@@ -271,11 +272,22 @@ Describe 'PE architecture helpers' {
     (Get-PEArchitectureInfo -Path $Arm64Dll).RecommendedWinGetArchitecture | Should -Be 'arm64'
   }
 
-  It 'Should exclude ARM32 from recommendations' {
+  It 'Should map ARM32 DLLs to the WinGet arm architecture' {
     $Info = Get-PEArchitectureInfo -Path (Get-PortableTestPEFixture -Name 'native-arm.dll' -Machine 0x01C4 -Dll)
 
-    $Info.RecommendedWinGetArchitectures | Should -BeNullOrEmpty
-    $Info.Diagnostics.Message | Should -BeLike '*ARM32*excluded*'
+    $Info.NativeArchitecture | Should -Be 'arm'
+    $Info.RecommendedWinGetArchitecture | Should -Be 'arm'
+    $Info.RecommendedWinGetArchitectures | Should -Be @('arm')
+    Test-PEArchitecture -Path $Info.Path -Architecture arm | Should -BeTrue
+    $Info.Diagnostics | Should -BeNullOrEmpty
+  }
+
+  It 'Should recognize the real 7-Zip ARM32 installer PE architecture' -Tag RealFixture {
+    $Fixture = Get-DumplingsTestFixture -RelativePath 'Installers\PE\7zip.7zip\26.03\7z2603-arm.exe' -Uri 'https://github.com/ip7z/7zip/releases/download/26.03/7z2603-arm.exe' -Sha256 '74144F45945359FCE65C67228A7975EAA55C897CC7255942746654F4AB66CAD6'
+    $Info = Get-PEArchitectureInfo -Path $Fixture
+
+    $Info.MachineName | Should -Be 'ARMNT'
+    $Info.RecommendedWinGetArchitecture | Should -Be 'arm'
   }
 
   It 'Should report .NET Framework AnyCPU below 4.8.1 as x86 and x64 only' {
@@ -376,6 +388,19 @@ Describe 'PE dependency helpers' {
     $Info = Get-PEDependencyInfo -Path $Path
 
     $Info.RecommendedPackageDependencyIds | Should -Contain 'Microsoft.VCRedist.2015+.arm64'
+  }
+
+  It 'Should preserve ARM32 VC runtime evidence without inventing a package dependency' {
+    $Path = Get-PortableTestPEFixture -Name 'vcredist-arm.exe' -Machine 0x01C4 -Imports @('vcruntime140.dll')
+
+    $Info = Get-PEDependencyInfo -Path $Path
+
+    $Info.DependsOnVCRedist | Should -BeTrue
+    $Info.VCRedistImports | Should -HaveCount 1
+    $Info.VCRedistImports[0].Architecture | Should -Be 'arm'
+    $Info.VCRedistImports[0].PackageIdentifier | Should -BeNullOrEmpty
+    $Info.RecommendedPackageDependencyIds | Should -BeNullOrEmpty
+    $Info.Diagnostics.Message | Should -Contain "Import 'vcruntime140.dll' maps to VC++ 2015+, but no Microsoft.VCRedist.2015+.arm package is available."
   }
 
   It 'Should report UCRT imports separately from VCRedist package dependencies' {

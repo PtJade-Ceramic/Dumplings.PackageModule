@@ -7,7 +7,7 @@
 Set-StrictMode -Version 3
 
 $Script:WinGetAuthoringManifestVersion = '1.12.0'
-$Script:WinGetAuthoringArchitectures = @('x86', 'x64', 'arm64')
+$Script:WinGetAuthoringArchitectures = @('x86', 'x64', 'arm', 'arm64')
 
 function ConvertTo-WinGetAuthoringDictionary {
   <#
@@ -242,6 +242,7 @@ function ConvertTo-WinGetAuthoringArchitecture {
   switch -Regex ($Architecture.Trim().ToLowerInvariant()) {
     '^(x86|i[3-6]86|win32)$' { return 'x86' }
     '^(x64|amd64|x86_64|win64)$' { return 'x64' }
+    '^(arm|arm32)$' { return 'arm' }
     '^(arm64|aarch64)$' { return 'arm64' }
     default { return $null }
   }
@@ -562,7 +563,7 @@ function Get-WinGetInstallerManifestSuggestion {
   param (
     [Parameter(Mandatory)][uri]$InstallerUrl,
     [string]$InstallerPath,
-    [ValidateSet('x86', 'x64', 'arm64')][string[]]$Architecture,
+    [ValidateSet('x86', 'x64', 'arm', 'arm64')][string[]]$Architecture,
     [ValidateSet('user', 'machine')][string]$Scope,
     [string]$NestedInstallerFile,
     [System.Collections.IDictionary]$Override = [ordered]@{},
@@ -677,7 +678,7 @@ function Get-WinGetInstallerManifestSuggestion {
     $Architectures = @($Architecture | Where-Object { $_ } | Select-Object -Unique)
     if ($Architectures.Count -eq 0 -and $Projection.Architecture) { $Architectures = @($Projection.Architecture) }
     if ($Architectures.Count -eq 0) {
-      $AuthoringDiagnostics.Add((New-InstallerDiagnostic -Id 'WinGetAuthoring.ArchitectureRequired' -Source 'WinGetManifestAuthoring' -Message 'A concrete x86, x64, or arm64 architecture is required because static analysis did not prove exactly one architecture.' -Kind Invalid -Areas Metadata -AffectedFields Architecture))
+      $AuthoringDiagnostics.Add((New-InstallerDiagnostic -Id 'WinGetAuthoring.ArchitectureRequired' -Source 'WinGetManifestAuthoring' -Message 'A concrete x86, x64, arm, or arm64 architecture is required because static analysis did not prove exactly one architecture.' -Kind Invalid -Areas Metadata -AffectedFields Architecture))
     }
 
     $Installers = [System.Collections.Generic.List[System.Collections.IDictionary]]::new()
@@ -755,7 +756,7 @@ function Add-WinGetManifestInstaller {
     [Parameter(Mandatory, ParameterSetName = 'Suggestion')]$Suggestion,
     [Parameter(Mandatory, ParameterSetName = 'Analyze')][uri]$InstallerUrl,
     [Parameter(ParameterSetName = 'Analyze')][string]$InstallerPath,
-    [Parameter(ParameterSetName = 'Analyze')][ValidateSet('x86', 'x64', 'arm64')][string[]]$Architecture,
+    [Parameter(ParameterSetName = 'Analyze')][ValidateSet('x86', 'x64', 'arm', 'arm64')][string[]]$Architecture,
     [Parameter(ParameterSetName = 'Analyze')][ValidateSet('user', 'machine')][string]$Scope,
     [Parameter(ParameterSetName = 'Analyze')][string]$NestedInstallerFile,
     [Parameter(ParameterSetName = 'Analyze')][System.Collections.IDictionary]$Override = [ordered]@{},

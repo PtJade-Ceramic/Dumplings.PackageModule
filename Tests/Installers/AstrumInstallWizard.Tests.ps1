@@ -18,6 +18,7 @@ BeforeAll {
   $Script:AstrumEarly20150 = Resolve-DumplingsTestFixturePath -RelativePath 'Installers\AstrumInstallWizard\Thraex.AstrumInstallWizard\2.01.50\setup.exe'
   $Script:AstrumModern22120 = Resolve-DumplingsTestFixturePath -RelativePath 'Installers\AstrumInstallWizard\Thraex.AstrumInstallWizard\2.21.20\setup.exe'
   $Script:BreakAlube = Resolve-DumplingsTestFixturePath -RelativePath 'Installers\AstrumInstallWizard\GroeneveldBeka.BreakAlubePCGINA\1.0.1.5\setup.exe'
+  $Script:IconicoScreenMeasurementPack = Resolve-DumplingsTestFixturePath -RelativePath 'Installers\AstrumInstallWizard\Iconico.ScreenMeasurementPack\2025-02-18\ScreenMeasurementPack.zip'
   $Script:AstrumVariants = Resolve-DumplingsTestFixturePath -RelativePath 'Builders\AstrumInstallWizard\2.29.50\Variants'
 }
 
@@ -136,6 +137,42 @@ Describe 'Astrum InstallWizard structural detection' {
     $Early2Info.Configuration.InstallPath | Should -Be '<ProgramFiles>\Astrum InstallWizard 2'
     $Early2Info.InstallerSwitches.Silent | Should -Be '/silent'
     $Early2Info.InstallerSuccessCodes | Should -Be @(1)
+  }
+
+  It 'dispatches mixed Astrum generations from the Iconico measurement bundle' {
+    if (-not (Test-Path -LiteralPath $Script:IconicoScreenMeasurementPack)) { Set-ItResult -Skipped -Because 'The Iconico Astrum fixture is not cached.'; return }
+    (Get-DumplingsTestFixtureHash -Path $Script:IconicoScreenMeasurementPack) | Should -Be '18DAE7C323F391A4B4F092BE7B6990561727E225B9124E476BAFB693CCD340BF'
+
+    $Cases = @(
+      @{ Entry = 'Caliper.exe'; Hash = 'DD2BA4F1C3AE8E2AE2C6AE01AE3F3C5260633EAF00C8BB4F95F51CA618BB8877'; Format = 'astrum-1'; Generation = '1.x'; Profile = 'Legacy1'; Route = 'Astrum1/SingleFile'; Name = 'Screen Calipers'; Version = '4.0'; Items = 3; Files = 56; Compression = @('GZip', 'Stored') },
+      @{ Entry = 'ColorPic.exe'; Hash = '1DE5CC14A08B240FEF37FEC3D7E6B70819F24D9CEB60E6F827CBDFBAEC985FB7'; Format = 'astrum-2'; Generation = '2.x'; Profile = 'Modern2'; Route = 'Astrum2/SignedSingleFile'; Name = 'ColorPic'; Version = '5.1'; Items = 1; Files = 6; Compression = @('GZip') }
+    )
+    $Archive = [IO.Compression.ZipFile]::OpenRead($Script:IconicoScreenMeasurementPack)
+    try {
+      foreach ($Case in $Cases) {
+        $Entry = $Archive.GetEntry($Case.Entry)
+        $Entry | Should -Not -BeNullOrEmpty
+        $InstallerPath = Join-Path $TestDrive $Case.Entry
+        $Input = $Entry.Open()
+        $Output = [IO.File]::Create($InstallerPath)
+        try { $Input.CopyTo($Output) } finally { $Output.Dispose(); $Input.Dispose() }
+
+        (Get-FileHash -LiteralPath $InstallerPath -Algorithm SHA256).Hash | Should -Be $Case.Hash
+        $Info = Get-AstrumInstallWizardInfo -Path $InstallerPath
+        $Info.FormatCatalogId | Should -Be $Case.Format
+        $Info.FormatGeneration | Should -Be $Case.Generation
+        $Info.ConfigurationProfile | Should -Be $Case.Profile
+        $Info.ContainerRoute | Should -Be $Case.Route
+        $Info.DisplayName | Should -Be $Case.Name
+        $Info.DisplayVersion | Should -Be $Case.Version
+        $Info.Scope | Should -Be 'machine'
+        @($Info.InstallationItems).Count | Should -Be $Case.Items
+        @($Info.PayloadCatalog).Count | Should -Be $Case.Files
+        @($Info.CompressionEvidence.Algorithm | Sort-Object -Unique) | Should -Be $Case.Compression
+      }
+    } finally {
+      $Archive.Dispose()
+    }
   }
 
   It 'requires complete explicitly ordered companion volumes for spanned media' {

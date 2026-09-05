@@ -267,6 +267,17 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
     @($Resolved.Installers.Architecture) | Should -Be @('x86', 'x64')
   }
 
+  It 'accepts an explicit ARM32 WinGet architecture' {
+    Mock Get-WinGetInstallerAnalysis -ModuleName WinGetManifestAuthoring {
+      New-AuthoringAnalyzerResult -Architecture $null -Extra @{ SupportedArchitectures = @() }
+    }
+
+    $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/setup.exe' -InstallerPath $Script:InstallerPath -Architecture arm
+
+    $Suggestion.Installers[0]['Architecture'] | Should -Be 'arm'
+    $Suggestion.HasBlockingDiagnostics | Should -BeFalse
+  }
+
   It 'authors trusted MSIX identity, platform, capabilities, and known dependencies' {
     Mock Get-WinGetInstallerAnalysis -ModuleName WinGetManifestAuthoring {
       New-AuthoringAnalyzerResult -FileType MSIXAppX -InstallerType msix -Extra @{

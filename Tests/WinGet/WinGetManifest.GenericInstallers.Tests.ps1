@@ -13,6 +13,24 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
       Mock Get-WinGetInstallerReleaseDate { return $null }
     }
 
+    It 'Accepts ARM32 architecture while parsing a generic EXE entry' {
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{
+          ParserResults      = @()
+          DetectedFamilies   = @()
+          RoutingHints       = @()
+          RejectedCandidates = @()
+          Diagnostics        = @()
+        }
+      }
+
+      $Result = Get-WinGetGenericInstallerManifestInfo -Path $Script:InstallerPath -Architecture arm -Logger $Script:Logger
+
+      $Result.ParserName | Should -Be 'Generic EXE'
+      $Result.Diagnostics.Id | Should -Contain 'WinGetManifestUpdate.GenericExe.NoParserMetadata'
+      $Result.Diagnostics.Id | Should -Not -Contain 'WinGetManifestUpdate.GenericExe.MetadataUpdateFailed'
+    }
+
     It 'Updates generic EXE metadata from a detected Advanced Installer parser result' {
       Mock Get-WinGetInstallerAnalysis {
         [pscustomobject]@{

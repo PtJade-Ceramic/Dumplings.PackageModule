@@ -20,6 +20,12 @@ Describe 'Get-InstallerSourceIdentity' {
     Get-InstallerSourceIdentity -Uri 'https://gitlab.example/group/subgroup/project/-/releases/v1/downloads/app.exe' | Should -Be 'gitlab.example/group/subgroup/project'
   }
 
+  It 'extracts stable GitLab API project identities' {
+    Get-InstallerSourceIdentity -Uri 'https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-releases/16.0.0/windows_10_cmake_Release_graphviz-install-16.0.0-win32.exe' | Should -Be 'gitlab.com/projects/4207231'
+    Get-InstallerSourceIdentity -Uri 'https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-releases/16.1.0/windows_10_cmake_Release_graphviz-install-16.1.0-win64.exe' | Should -Be 'gitlab.com/projects/4207231'
+    Get-InstallerSourceIdentity -Uri 'https://gitlab.example/api/v4/projects/group%2Fproject/packages/generic/application/1.0/application.exe' | Should -Be 'gitlab.example/projects/group%2Fproject'
+  }
+
   It 'extracts SourceForge project identities' {
     Get-InstallerSourceIdentity -Uri 'https://sourceforge.net/projects/sevenzip/files/7z.exe/download' | Should -Be 'sourceforge.net/projects/sevenzip'
   }

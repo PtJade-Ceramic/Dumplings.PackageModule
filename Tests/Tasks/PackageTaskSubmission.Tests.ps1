@@ -179,6 +179,18 @@ Describe 'PackageTask Check domain-change warning' {
     $Task.Logs -join "`n" | Should -Not -Match 'source identity'
   }
 
+  It 'does not warn when GitLab generic package versions change within one project' {
+    $Task = New-CheckTestTask -Name GitLabPackage `
+      -LastInstallerUrl 'https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-releases/16.0.0/windows_10_cmake_Release_graphviz-install-16.0.0-win32.exe' `
+      -CurrentInstallerUrl 'https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-releases/16.1.0/windows_10_cmake_Release_graphviz-install-16.1.0-win32.exe'
+    $Task.LastState.Installer += [ordered]@{ InstallerUrl = 'https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-releases/16.0.0/windows_10_cmake_Release_graphviz-install-16.0.0-win64.exe' }
+    $Task.CurrentState.Installer += [ordered]@{ InstallerUrl = 'https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-releases/16.1.0/windows_10_cmake_Release_graphviz-install-16.1.0-win64.exe' }
+
+    $null = $Task.Check()
+
+    $Task.Logs -join "`n" | Should -Not -Match 'source identity'
+  }
+
   It 'does not warn for a new task' {
     $TaskPath = Join-Path $TestDrive 'NewTask'
     $null = New-Item -Path $TaskPath -ItemType Directory -Force

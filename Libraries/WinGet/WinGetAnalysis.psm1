@@ -221,9 +221,9 @@ function Get-WinGetInstallerFamilyTemplate {
       [pscustomobject]@{
         InstallerType       = 'exe'
         InstallModes        = @('interactive', 'silent')
-        InstallerSwitches   = [ordered]@{ Silent = '/silent'; SilentWithProgress = '/silent'; InstallLocation = '/appfolder "<INSTALLPATH>"' }
+        InstallerSwitches   = [ordered]@{ Silent = '/silent'; InstallLocation = '/appfolder "<INSTALLPATH>"' }
         ExpectedReturnCodes = @()
-        Notes               = @('Verify accepted switch spelling and visible ARP entry in a VM.')
+        Notes               = @('DeployMaster documents /silent as fully hidden; it does not provide a distinct silent-with-progress mode.', 'Validate nested prerequisite behavior and the visible ARP entry in a VM.')
       }
     }
     '7z SFX' {
@@ -644,7 +644,7 @@ function Get-WinGetParserResultSuggestion {
   }
   foreach ($Source in $Sources) {
     $Architecture = Get-WinGetSuggestionPropertyValue -InputObject $Source -Name @('PackageArchitecture', 'Architecture', 'RecommendedWinGetArchitecture')
-    if ([string]$Architecture -cin @('x86', 'x64', 'arm64', 'neutral')) { $Fields['Architecture'] = [string]$Architecture; break }
+    if ([string]$Architecture -cin @('x86', 'x64', 'arm', 'arm64', 'neutral')) { $Fields['Architecture'] = [string]$Architecture; break }
   }
   foreach ($Source in $Sources) {
     $Location = Get-WinGetSuggestionPropertyValue -InputObject $Source -Name DefaultInstallLocation
@@ -802,7 +802,7 @@ function Get-WinGetParserResultSuggestion {
     foreach ($Source in $Sources) {
       $ArchitectureValue = Get-WinGetSuggestionPropertyValue -InputObject $Source -Name @('RecommendedWinGetArchitectures', 'SupportedArchitectures', 'PayloadArchitectures', 'Architectures')
       foreach ($Architecture in @($ArchitectureValue)) {
-        if ([string]$Architecture -cin @('x86', 'x64', 'arm64')) { [string]$Architecture }
+        if ([string]$Architecture -cin @('x86', 'x64', 'arm', 'arm64')) { [string]$Architecture }
       }
     }
   ) | Select-Object -Unique
@@ -849,7 +849,7 @@ function Get-WinGetPortableAnalysisSuggestion {
   param ([Parameter(Mandatory)][psobject]$PortableEvidence)
 
   $Fields = [ordered]@{ InstallerType = 'portable' }
-  $Architectures = @($PortableEvidence.RecommendedWinGetArchitectures | Where-Object { [string]$_ -cin @('x86', 'x64', 'arm64') } | Select-Object -Unique)
+  $Architectures = @($PortableEvidence.RecommendedWinGetArchitectures | Where-Object { [string]$_ -cin @('x86', 'x64', 'arm', 'arm64') } | Select-Object -Unique)
   if ($Architectures.Count -eq 1) { $Fields['Architecture'] = $Architectures[0] }
   $Dependencies = @($PortableEvidence.RecommendedPackageDependencies | Where-Object { $null -ne $_ })
   if ($Dependencies.Count -gt 0) { $Fields['Dependencies'] = [ordered]@{ PackageDependencies = $Dependencies } }

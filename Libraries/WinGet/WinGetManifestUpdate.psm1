@@ -148,7 +148,7 @@ function Get-WinGetKnownInstallerManifestInfo {
     [string]$InstallerType,
 
     [Parameter(HelpMessage = 'The target architecture from the effective WinGet installer entry')]
-    [ValidateSet('x86', 'x64', 'arm64', 'neutral')]
+    [ValidateSet('x86', 'x64', 'arm', 'arm64', 'neutral')]
     [string]$Architecture,
 
     [Parameter(HelpMessage = 'The target scope from the effective WinGet installer entry')]
@@ -413,7 +413,7 @@ function Get-WinGetGenericInstallerManifestInfo {
     [string]$Path,
 
     [Parameter(HelpMessage = 'The architecture of the installer entry')]
-    [ValidateSet('x86', 'x64', 'arm64', 'neutral')]
+    [ValidateSet('x86', 'x64', 'arm', 'arm64', 'neutral')]
     [string]$Architecture,
 
     [Parameter(HelpMessage = 'A previously computed installer analysis to reuse instead of re-analyzing the file')]

@@ -204,6 +204,16 @@ Describe 'Installer manifest behavior defaults' {
     }
   }
 
+  It 'Should not invent a DeployMaster silent-with-progress switch' {
+    InModuleScope WinGetAnalysis {
+      $DeployMaster = (Get-WinGetInstallerFamilySuggestion -Family 'DeployMaster').ManifestFields
+
+      $DeployMaster.InstallModes | Should -Be @('interactive', 'silent')
+      $DeployMaster.InstallerSwitches.Silent | Should -Be '/silent'
+      $DeployMaster.InstallerSwitches.PSObject.Properties.Name | Should -Not -Contain 'SilentWithProgress'
+    }
+  }
+
   It 'Should return schema-valid fields for every documented family projection' {
     InModuleScope WinGetAnalysis {
       $Families = @(
