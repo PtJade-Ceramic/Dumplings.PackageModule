@@ -187,6 +187,23 @@ Describe 'Shared archive helpers' {
     finally { $Output.Dispose(); $CompressedInput.Dispose() }
   }
 
+  It 'decodes one BZip2 member without treating trailing installer records as another member' {
+    Import-InstallerArchiveDependency
+    $Expected = [Text.Encoding]::UTF8.GetBytes(('deploymaster-classic-payload-' * 16))
+    $CompressedOutput = [IO.MemoryStream]::new()
+    $Encoder = [SharpCompress.Compressors.BZip2.BZip2Stream]::new($CompressedOutput, [SharpCompress.Compressors.CompressionMode]::Compress, $false)
+    try { $Encoder.Write($Expected, 0, $Expected.Length) } finally { $Encoder.Dispose() }
+    $Compressed = $CompressedOutput.ToArray() + [byte[]](0x44, 0x41, 0x54, 0x41)
+
+    $CompressedInput = [IO.MemoryStream]::new($Compressed, $false)
+    $Output = [IO.MemoryStream]::new()
+    try {
+      Expand-InstallerCompressedStream -Algorithm BZip2 -Stream $CompressedInput -Destination $Output -MaximumBytes 4096 | Should -Be $Expected.Length
+      $Output.ToArray() | Should -Be $Expected
+      $CompressedInput.CanRead | Should -BeTrue
+    } finally { $Output.Dispose(); $CompressedInput.Dispose(); $CompressedOutput.Dispose() }
+  }
+
   It 'opens and exports a bounded ZIP entry' {
     $ZipPath = Join-Path $Script:TemporaryRoot 'sample.zip'
     $SourcePath = Join-Path $Script:TemporaryRoot 'source.txt'

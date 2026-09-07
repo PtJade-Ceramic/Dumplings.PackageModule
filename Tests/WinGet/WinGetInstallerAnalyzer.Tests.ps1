@@ -580,11 +580,39 @@ Describe 'WinGet installer analyzer content detection' {
     $Suggestion = & $Module { Get-WinGetInstallerFamilySuggestion -Family 'Actual Installer' }
     $Defaults = $Suggestion.ManifestFields
 
-    $Defaults.InstallerSwitches.Silent | Should -Be '/S /L'
+    $Defaults.InstallerSwitches.Silent | Should -Be '/S'
     $Defaults.InstallerSwitches.InstallLocation | Should -Be '/D "<INSTALLPATH>"'
+    $Defaults.InstallModes | Should -Be @('interactive', 'silent')
+    $Defaults.InstallerSwitches.PSObject.Properties.Name | Should -Not -Contain 'SilentWithProgress'
+    $Defaults.InstallerSwitches.PSObject.Properties.Name | Should -Not -Contain 'Interactive'
     ($Suggestion.ManifestVariants | Where-Object Name -EQ user).ManifestFields.InstallerSwitches.Custom | Should -Be '/CU'
     ($Suggestion.ManifestVariants | Where-Object Name -EQ machine).ManifestFields.InstallerSwitches.Custom | Should -Be '/RUNAS /ALL'
-    $Suggestion.SuggestedNextSteps | Should -Contain 'Actual Installer can use /CU for current-user scope and /RUNAS /ALL for machine scope.'
+    $Suggestion.SuggestedNextSteps | Should -Contain 'Actual Installer can use /CU for current-user scope and /RUNAS /ALL for machine scope when the compiled InstallLevel permits both.'
+  }
+
+  It 'Should let parsed Actual Installer policy replace generic scope and silent defaults' {
+    $Module = Get-Module WinGetAnalysis
+    $ParserResult = [pscustomobject]@{
+      Family        = 'Actual Installer'
+      InstallerType = 'exe'
+      Metadata      = [pscustomobject]@{
+        Scope                 = 'machine'
+        SupportedScopes       = @('machine')
+        ScopeSwitches         = $null
+        InstallModes          = @('interactive')
+        InstallerSwitches     = [ordered]@{ InstallLocation = '/D "<INSTALLPATH>"' }
+        InstallerSuccessCodes = @()
+        ElevationRequirement  = 'elevatesSelf'
+      }
+    }
+    $Suggestion = & $Module { param($ParserResult) Get-WinGetParserResultSuggestion -Result $ParserResult } $ParserResult
+
+    $Suggestion.ManifestFields.Scope | Should -Be 'machine'
+    $Suggestion.ManifestFields.InstallModes | Should -Be @('interactive')
+    $Suggestion.ManifestFields.InstallerSwitches.InstallLocation | Should -Be '/D "<INSTALLPATH>"'
+    $Suggestion.ManifestFields.InstallerSwitches.PSObject.Properties.Name | Should -Not -Contain 'Silent'
+    $Suggestion.ManifestFields.ElevationRequirement | Should -Be 'elevatesSelf'
+    $Suggestion.ManifestVariants | Should -BeNullOrEmpty
   }
 
   It 'Should route Paquet Builder markers to its family defaults' {

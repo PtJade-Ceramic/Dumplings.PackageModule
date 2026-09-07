@@ -210,11 +210,11 @@ function Get-WinGetInstallerFamilyTemplate {
     'Actual Installer' {
       [pscustomobject]@{
         InstallerType       = 'exe'
-        InstallModes        = @('interactive', 'silent', 'silentWithProgress')
-        InstallerSwitches   = [ordered]@{ Silent = '/S /L'; SilentWithProgress = '/S /L'; Interactive = '/L'; InstallLocation = '/D "<INSTALLPATH>"' }
+        InstallModes        = @('interactive', 'silent')
+        InstallerSwitches   = [ordered]@{ Silent = '/S'; InstallLocation = '/D "<INSTALLPATH>"' }
         ExpectedReturnCodes = @()
         ScopeSwitches       = [pscustomobject]@{ User = '/CU'; Machine = '/RUNAS /ALL' }
-        Notes               = @('Actual Installer can use /CU for current-user scope and /RUNAS /ALL for machine scope.', 'Verify package-specific ARP data and whether the setup permits both scopes.')
+        Notes               = @('Actual Installer can use /CU for current-user scope and /RUNAS /ALL for machine scope when the compiled InstallLevel permits both.', 'The /L switch writes a fixed AISETUPLOG.TXT file and does not define a separate progress mode.', 'Verify package-specific ARP data and whether the setup permits both scopes.')
       }
     }
     'DeployMaster' {
@@ -754,6 +754,10 @@ function Get-WinGetParserResultSuggestion {
     }
   }
   $ScopeInstallLocationSwitches = if ($Metadata) { Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name ScopeInstallLocationSwitches } else { $null }
+  # Generic family guidance advertises every documented scope route. Once an
+  # Actual Installer artifact has been parsed, discard those generic variants
+  # and rebuild only the routes allowed by its compiled InstallLevel.
+  if ($Family -ceq 'Actual Installer' -and $Metadata) { $Variants.Clear() }
   if ($ScopeSwitches) {
     $Variants.Clear()
     foreach ($Scope in @('user', 'machine')) {

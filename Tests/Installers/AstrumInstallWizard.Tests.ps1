@@ -9,6 +9,8 @@ BeforeAll {
   $Script:AstrumProbe = Resolve-DumplingsTestFixturePath -RelativePath 'Builders\AstrumInstallWizard\2.29.50\ProbeNormal\ProbeNormal.exe'
   $Script:AstrumTiny = Resolve-DumplingsTestFixturePath -RelativePath 'Builders\AstrumInstallWizard\2.29.50\ProbeTiny.exe'
   $Script:AstrumTinyVerbose = Resolve-DumplingsTestFixturePath -RelativePath 'Builders\AstrumInstallWizard\2.29.50\ProbeTinyVerbose.exe'
+  $Script:AstrumLegacyTiny = Resolve-DumplingsTestFixturePath -RelativePath 'Builders\AstrumInstallWizard\1.95.5\LegacyTiny.exe'
+  $Script:AstrumLegacyTinyVerbose = Resolve-DumplingsTestFixturePath -RelativePath 'Builders\AstrumInstallWizard\1.95.5\LegacyTinyVerbose.exe'
   $Script:AstrumSpannedDirectory = Resolve-DumplingsTestFixturePath -RelativePath 'Builders\AstrumInstallWizard\2.29.50\ProbeSpanned'
   $Script:AstrumSpanned = Join-Path $Script:AstrumSpannedDirectory 'ProbeSpanned.exe'
   $Script:AstrumVolumes = @(Get-ChildItem -LiteralPath $Script:AstrumSpannedDirectory -Filter 'ProbeSpanned.0*' -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -ExpandProperty FullName)
@@ -20,6 +22,7 @@ BeforeAll {
   $Script:BreakAlube = Resolve-DumplingsTestFixturePath -RelativePath 'Installers\AstrumInstallWizard\GroeneveldBeka.BreakAlubePCGINA\1.0.1.5\setup.exe'
   $Script:IconicoScreenMeasurementPack = Resolve-DumplingsTestFixturePath -RelativePath 'Installers\AstrumInstallWizard\Iconico.ScreenMeasurementPack\2025-02-18\ScreenMeasurementPack.zip'
   $Script:AstrumVariants = Resolve-DumplingsTestFixturePath -RelativePath 'Builders\AstrumInstallWizard\2.29.50\Variants'
+  $Script:AstrumResourceFile = Resolve-DumplingsTestFixturePath -RelativePath 'Builders\AstrumInstallWizard\2.29.50\Variants\ResourceFile\ResourceFile.exe'
 }
 
 Describe 'Astrum InstallWizard structural detection' {
@@ -27,6 +30,17 @@ Describe 'Astrum InstallWizard structural detection' {
     InModuleScope AstrumInstallWizard {
       $Script:AstrumFormatCatalog.CatalogVersion | Should -Be 1
       @($Script:AstrumFormatsByFooterLength.Values).Count | Should -Be 2
+      $Script:AstrumOperationSemantics.TextActions[1] | Should -Be 'Add to end of file'
+      $Script:AstrumOperationSemantics.FileActions[1] | Should -Be 'Delete'
+      $Script:AstrumOperationSemantics.InteractiveActions[1] | Should -Be 'Open document'
+      $Script:AstrumOperationSemantics.InteractiveActions[6] | Should -Be 'Execute program and wait'
+      $Script:AstrumOperationSemantics.InteractiveActions[9] | Should -Be 'Assign variable value'
+      $Script:AstrumOperationSemantics.Timings[13] | Should -Be 'On shutdown'
+      $Script:AstrumOperationSemantics.ConditionOperators[3] | Should -Be 'Less than'
+      $Script:AstrumOperationSemantics.ConditionOperators[6] | Should -Be 'Contains / Binary and'
+      $Script:AstrumVariableSemantics.Types | Should -Be @('Text', 'Number')
+      $Script:AstrumVariableSemantics.Sources['0'] | Should -Be 'Registry'
+      $Script:AstrumVariableSemantics.Sources['4294967295'] | Should -Be 'Nowhere'
       @($Script:AstrumFormatsByGeneration.Keys | Sort-Object) | Should -Be @('1.x', '2.x')
 
       foreach ($Format in $Script:AstrumFormatsByFooterLength.Values) {
@@ -42,10 +56,15 @@ Describe 'Astrum InstallWizard structural detection' {
       }
 
       $Modern = $Script:AstrumConfigurationProfiles.Modern2
+      $Script:AstrumConfigurationProfiles.Legacy1.ObservedVersionRange | Should -Be '1.80-1.95.5'
+      $Script:AstrumConfigurationProfiles.Early2.ObservedVersionRange | Should -Be '2.01.50-2.04.20'
+      $Modern.ObservedVersionRange | Should -Be '2.21.20-2.29.50'
       @($Modern.OptionFields.Name | Sort-Object -Unique).Count | Should -Be @($Modern.OptionFields).Count
       $Modern.OptionFields.Name | Should -Contain 'MinimumCpuSpeedMHz'
+      $Modern.OptionFields.Name | Should -Contain 'MinimumJavaVersion'
       $Modern.OptionFields.Name | Should -Contain 'RequireAdmin'
       $Modern.OptionFields.Name | Should -Contain 'ProhibitSilentInstallation'
+      @($Modern.OptionFields | Where-Object Origin -EQ 'AfterJavaVersion').Count | Should -BeGreaterThan 0
     }
   }
 
@@ -79,6 +98,16 @@ Describe 'Astrum InstallWizard structural detection' {
     (Get-AstrumInstallWizardInfo -Path $Script:AstrumTinyVerbose).ContainerRoute | Should -Be 'Astrum2/TinyVerbose'
     Test-AstrumInstallWizard -Path $Script:AstrumTiny | Should -BeTrue
     Test-AstrumInstallWizard -Path $Script:AstrumTinyVerbose | Should -BeTrue
+  }
+
+  It 'unwraps legacy 1.x silent and verbose tiny media through the same validated descriptor route' {
+    if (-not (Test-Path -LiteralPath $Script:AstrumLegacyTiny) -or -not (Test-Path -LiteralPath $Script:AstrumLegacyTinyVerbose)) { Set-ItResult -Skipped -Because 'The controlled legacy Astrum tiny fixtures are not cached.'; return }
+    (Get-FileHash -LiteralPath $Script:AstrumLegacyTiny -Algorithm SHA256).Hash | Should -Be 'C946D74CA1FB684AFCC95B37718F9D1E87F3712CB34DE8CC9F1215B9C89A039B'
+    (Get-FileHash -LiteralPath $Script:AstrumLegacyTinyVerbose -Algorithm SHA256).Hash | Should -Be '13AF2019ACF4C8F3155E145A89305CF87D0FEB9FD5B40A10CF4317823B486F13'
+    (Get-AstrumInstallWizardInfo -Path $Script:AstrumLegacyTiny).ContainerRoute | Should -Be 'Astrum1/Tiny'
+    (Get-AstrumInstallWizardInfo -Path $Script:AstrumLegacyTinyVerbose).ContainerRoute | Should -Be 'Astrum1/TinyVerbose'
+    Test-AstrumInstallWizard -Path $Script:AstrumLegacyTiny | Should -BeTrue
+    Test-AstrumInstallWizard -Path $Script:AstrumLegacyTinyVerbose | Should -BeTrue
   }
 
   It 'locates the logical Astrum trailer before a PE certificate table' {
@@ -123,13 +152,24 @@ Describe 'Astrum InstallWizard structural detection' {
       $Info.PayloadCatalog.Count | Should -Be $Case.Files
       $Info.Trailer.HasMagic | Should -Be $Case.HasMagic
       $Info.ParserVersionInfo.CatalogVersion | Should -Be 1
+      $Info.ParserVersionInfo.ConfigurationProfileObservedVersionRange | Should -Not -BeNullOrEmpty
     }
 
     $LegacyInfo = Get-AstrumInstallWizardInfo -Path $Script:AstrumLegacy180
-    $LegacyInfo.SupportsSilentInstallation | Should -BeNullOrEmpty
-    $LegacyInfo.InstallerSwitches.Count | Should -Be 0
+    $LegacyInfo.SupportsSilentInstallation | Should -BeTrue
+    $LegacyInfo.InstallerSwitches.Silent | Should -Be '/silent'
+    $LegacyInfo.InstallModes | Should -Be @('interactive', 'silent')
     $LegacyInfo.InstallerSuccessCodes | Should -BeNullOrEmpty
-    $LegacyInfo.Diagnostics.Id | Should -Contain 'Astrum.Silent.LegacyRuntimeVersionRequired'
+    $LegacyInfo.RuntimeCommandLineEvidence.Switches | Should -Contain '/silent'
+    $LegacyInfo.RuntimeCommandLineEvidence.Offsets.'/silent' | Should -BeGreaterThan 0
+    $LegacyRecords = @($LegacyInfo.Shortcuts) + @($LegacyInfo.IniOperations) + @($LegacyInfo.TextOperations) + @($LegacyInfo.FileOperations) + @($LegacyInfo.InteractiveOperations)
+    $LegacyRecords.Count | Should -BeGreaterThan 0
+    @($LegacyRecords.ObservedOperationTail | Sort-Object -Unique) | Should -Be @(0)
+    @($LegacyRecords.Condition | Where-Object { $_ }).Count | Should -Be 0
+    $LegacyInfo.Diagnostics.Id | Should -Not -Contain 'Astrum.Silent.LegacyRuntimeVersionRequired'
+    $VersionedRuntime = $LegacyInfo.PayloadCatalog | Where-Object Path -Like '*Astrum InstallWizard.exe'
+    $VersionedRuntime.VersionResourceEvidence.FileVersion | Should -Be '1.8.0.0'
+    $VersionedRuntime.VersionResourceEvidence.CodePage | Should -Be 1252
 
     $Early2Info = Get-AstrumInstallWizardInfo -Path $Script:AstrumEarly20150
     $Early2Info.Configuration.ApplicationName | Should -Be 'Astrum InstallWizard 2'
@@ -137,6 +177,11 @@ Describe 'Astrum InstallWizard structural detection' {
     $Early2Info.Configuration.InstallPath | Should -Be '<ProgramFiles>\Astrum InstallWizard 2'
     $Early2Info.InstallerSwitches.Silent | Should -Be '/silent'
     $Early2Info.InstallerSuccessCodes | Should -Be @(1)
+    ($Early2Info.Variables | Where-Object Name -EQ '<DesktopShortcut>').SourceName | Should -Be 'Nowhere'
+    $UserHomeVariable = $Early2Info.Variables | Where-Object Name -EQ '<UserHome>'
+    $UserHomeVariable.TypeName | Should -Be 'Text'
+    $UserHomeVariable.SourceName | Should -Be 'Registry'
+    $UserHomeVariable.Location1 | Should -Be '-2147483647'
   }
 
   It 'dispatches mixed Astrum generations from the Iconico measurement bundle' {
@@ -153,9 +198,9 @@ Describe 'Astrum InstallWizard structural detection' {
         $Entry = $Archive.GetEntry($Case.Entry)
         $Entry | Should -Not -BeNullOrEmpty
         $InstallerPath = Join-Path $TestDrive $Case.Entry
-        $Input = $Entry.Open()
+        $ArchiveInput = $Entry.Open()
         $Output = [IO.File]::Create($InstallerPath)
-        try { $Input.CopyTo($Output) } finally { $Output.Dispose(); $Input.Dispose() }
+        try { $ArchiveInput.CopyTo($Output) } finally { $Output.Dispose(); $ArchiveInput.Dispose() }
 
         (Get-FileHash -LiteralPath $InstallerPath -Algorithm SHA256).Hash | Should -Be $Case.Hash
         $Info = Get-AstrumInstallWizardInfo -Path $InstallerPath
@@ -169,6 +214,18 @@ Describe 'Astrum InstallWizard structural detection' {
         @($Info.InstallationItems).Count | Should -Be $Case.Items
         @($Info.PayloadCatalog).Count | Should -Be $Case.Files
         @($Info.CompressionEvidence.Algorithm | Sort-Object -Unique) | Should -Be $Case.Compression
+        if ($Case.Entry -eq 'Caliper.exe') {
+          # The 1.x interactive-action record ends after ExecuteCount. These checks prevent the
+          # following application identity from being consumed as nonexistent 2.x tail fields.
+          $Info.Configuration.ApplicationName | Should -Be 'Screen Calipers'
+          $Info.Configuration.CompanyName | Should -Be 'Iconico'
+          $Info.Configuration.InstallPath | Should -Be '<ProgramFiles>\Screen Calipers 4.0'
+          @($Info.InteractiveOperations).Count | Should -Be 1
+          $Info.InteractiveOperations[0].Flags | Should -BeNullOrEmpty
+          $Info.InteractiveOperations[0].CustomMessage | Should -BeNullOrEmpty
+          $Info.InteractiveOperations[0].Condition | Should -BeNullOrEmpty
+          $Info.InteractiveOperations[0].ObservedOperationTail | Should -BeNullOrEmpty
+        }
       }
     } finally {
       $Archive.Dispose()
@@ -200,16 +257,25 @@ Describe 'Astrum InstallWizard metadata and ARP evidence' {
     $Info.Publisher | Should -Be 'Dumplings ARP Publisher'
     $Info.ProductCode | Should -Be 'Dumplings Astrum Probe'
     $Info.Scope | Should -Be 'machine'
+    $Info.RegistryView | Should -Be '32-bit'
     $Info.ElevationRequirement | Should -Be 'elevationRequired'
-    $Info.DefaultInstallLocation | Should -Be '%ProgramFiles%\Dumplings Astrum Probe'
+    $Info.DefaultInstallLocation | Should -Be '%ProgramFiles(x86)%\Dumplings Astrum Probe'
+    $Info.UninstallString | Should -Be '"%ProgramFiles(x86)%\Dumplings Astrum Probe\Odd Uninstaller.exe"'
     $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
+    $Info.ArpEntries.Count | Should -Be 1
+    $Info.ArpEntries[0].Root | Should -Be 'HKLM'
+    $Info.ArpEntries[0].InstallLocation | Should -BeNullOrEmpty
+    $Info.ArpEntries[0].DisplayIcon | Should -BeNullOrEmpty
     $Info.InstallerSwitches.Silent | Should -Be '/silent'
     $Info.InstallModes | Should -Be @('interactive', 'silent')
     $Info.InstallerSuccessCodes | Should -Be @(1)
     $Info.PayloadCatalog.Path | Should -Contain '<InstallDir>\Data\Alpha.txt'
     $Info.PayloadCatalog.Compression | Should -Contain 'Stored'
     $Info.Footer.UninstallerCompressedSize | Should -BeGreaterThan 0
-    $Info.Diagnostics.Id | Should -Contain 'Astrum.Configuration.PartialTail'
+    $Info.Diagnostics.Id | Should -Not -Contain 'Astrum.Configuration.PartialTail'
+    $Info.Configuration.OptionBlockSize | Should -Be 355
+    $Info.Configuration.OptionBlockEvidence.AssignedByteCount | Should -Be 95
+    $Info.Configuration.OptionBlockEvidence.UnassignedRanges.Count | Should -BeGreaterThan 0
     @($Info.Diagnostics | Where-Object { $null -ne $_.Level }).Count | Should -Be 0
     $Info.UnresolvedFields | Should -BeNullOrEmpty
   }
@@ -225,26 +291,98 @@ Describe 'Astrum InstallWizard metadata and ARP evidence' {
     $Info.InstallationItems.Count | Should -Be 2
     $Info.Shortcuts.Count | Should -Be 5
     $Info.FileOperations.Count | Should -Be 4
+    $Info.TextOperations[0].OperationName | Should -Be 'Add to end of file'
+    $Info.FileOperations[0].ActionName | Should -Be 'Delete'
+    $Info.FileOperations[0].TimingName | Should -Be 'After installation'
     $Info.InteractiveOperations.Count | Should -Be 2
+    $Info.InteractiveOperations[0].ActionName | Should -Be 'Assign variable value'
+    $Info.InteractiveOperations[0].TimingName | Should -Be 'At program startup'
+    $Info.InteractiveOperations[1].ActionName | Should -Be 'Execute program'
+    $Info.InteractiveOperations[1].TimingName | Should -Be 'On shutdown'
+    $Info.InteractiveOperations[1].Condition.OperatingSystemMask | Should -Be 1
+    $Info.InteractiveOperations[1].Condition.Terms[0].OperatorName | Should -Be 'Equals'
+    $Info.InteractiveOperations[1].Condition.Terms[1].OperatorName | Should -Be 'Less than'
     $Info.ExecutedPayloads.Count | Should -Be 1
     $Info.ExecutedPayloads[0].File | Should -Be '<InstallDir>\converter.exe'
+    $DesktopShortcutVariable = $Info.Variables | Where-Object Name -EQ '<DesktopShortcut>'
+    $DesktopShortcutVariable.TypeName | Should -Be 'Number'
+    $DesktopShortcutVariable.SourceName | Should -Be 'Nowhere'
+    $DesktopShortcutVariable.DefaultValue | Should -Be '0'
+    $VersionVariable = $Info.Variables | Where-Object Name -EQ '<Version1Installed>'
+    $VersionVariable.SourceName | Should -Be 'Registry'
+    $VersionVariable.SetTrueIfExists | Should -BeTrue
+    $Info.Diagnostics.Id | Should -Not -Contain 'Astrum.Variable.UnknownCode'
     $Info.FileExtensions | Should -Contain 'ai2'
     $Info.FileExtensions | Should -Contain 'adt'
   }
 
-  It 'retains unresolved BreakAlube templates as evidence without projecting them as names' {
+  It 'resolves BreakAlube variables whose compiled source has a deterministic default' {
     if (-not (Test-Path -LiteralPath $Script:BreakAlube)) { Set-ItResult -Skipped -Because 'The supplied BreakAlube installer is not cached.'; return }
     (Get-FileHash -LiteralPath $Script:BreakAlube -Algorithm SHA256).Hash | Should -Be '9024FD2F27A0B2192B44A00A66FB2BFA37E5309DA3645194E9FC6F1D1E158600'
     $Info = Get-AstrumInstallWizardInfo -Path $Script:BreakAlube
-    $Info.DisplayName | Should -Be 'PC-GINA V1.0.1.5'
+    $Info.DisplayName | Should -Be 'PC-GINA V1.0.1.5BreakAlube, PC-GINA, '
     $Info.ProductCode | Should -Be 'PC-GINA V1.0.1.5'
+    $Info.Scope | Should -Be 'machine'
+    $Info.RegistryView | Should -Be '32-bit'
     $Info.PayloadCatalog.Count | Should -Be 5
     $Info.InstallationItems.Name | Should -Contain 'driver'
-    $Info.ArpEntries[0].DisplayName | Should -Match '<TimerName>'
-    $Info.AppsAndFeaturesEntries[0].PSObject.Properties.Name | Should -Not -Contain 'DisplayName'
-    $Info.Diagnostics.Id | Should -Contain 'Astrum.Arp.Unresolved.DisplayName'
-    $Info.UnresolvedFields | Should -Contain 'DisplayName'
+    $Info.ArpEntries[0].DisplayName | Should -Be 'PC-GINA V1.0.1.5BreakAlube, PC-GINA, '
+    $Info.ArpEntries[0].Root | Should -Be 'HKLM'
+    $Info.ArpEntries[0].InstallLocation | Should -BeNullOrEmpty
+    $Info.ArpEntries[0].UninstallString | Should -Be '"%WINDIR%\BreakAlube, PC-GINA, 1.0.1.5 Uninstaller.exe"'
+    $Info.ArpEntries[0].DisplayIcon | Should -Be '%ProgramFiles(x86)%\Groeneveld Software\BreakAlube, PC-GINA, V1.0.1.5\driver\Groeneveld icon.ico'
+    $Info.DefaultInstallLocation | Should -Be '%ProgramFiles(x86)%\Groeneveld Software\BreakAlube, PC-GINA, V1.0.1.5'
+    $Info.DisplayIcon | Should -Be '%ProgramFiles(x86)%\Groeneveld Software\BreakAlube, PC-GINA, V1.0.1.5\driver\Groeneveld icon.ico'
+    $Info.AppsAndFeaturesEntries[0].DisplayName | Should -Be 'PC-GINA V1.0.1.5BreakAlube, PC-GINA, '
+    $Info.Diagnostics.Id | Should -Not -Contain 'Astrum.Arp.Unresolved.DisplayName'
+    $Info.Diagnostics.Id | Should -Not -Contain 'Astrum.Arp.Unresolved.UninstallString'
+    $Info.Diagnostics.Id | Should -Not -Contain 'Astrum.Arp.Unresolved.DisplayIcon'
+    $Info.UnresolvedFields | Should -Be @()
     $Info.DisplayVersion | Should -Be '1.0.1.5'
+    $Info.InteractiveOperations[0].ActionCode | Should -Be 6
+    $Info.InteractiveOperations[0].ActionName | Should -Be 'Execute program and wait'
+    $Info.ExecutedPayloads.Count | Should -Be 1
+    $Info.ExecutedPayloads[0].File | Should -Be '<InstallDir>\driver\CDM20802_Setup.exe'
+    ($Info.Variables | Where-Object Name -EQ '<TimerName>').SourceName | Should -Be 'Nowhere'
+    $MainPathVariable = $Info.Variables | Where-Object Name -EQ '<MainPath>'
+    $MainPathVariable.SourceName | Should -Be 'Registry'
+    $MainPathVariable.Location1 | Should -Be '-2147483648'
+  }
+
+  It 'resolves only static custom-variable defaults and bounds recursive substitution' {
+    InModuleScope AstrumInstallWizard {
+      $Configuration = [pscustomobject]@{
+        ApplicationName = 'App'; ApplicationVersion = '1'; CompanyName = 'Publisher'; UninstallerName = 'Uninstall.exe'
+        Variables = @(
+          [pscustomobject]@{ Name = '<Literal>'; DefaultValue = '<Nested>'; SourceCode = [uint32]::MaxValue; Location1 = ''; Location2 = ''; Location3 = '' },
+          [pscustomobject]@{ Name = '<Nested>'; DefaultValue = 'Resolved'; SourceCode = [uint32]::MaxValue; Location1 = ''; Location2 = ''; Location3 = '' },
+          [pscustomobject]@{ Name = '<Dynamic>'; DefaultValue = 'Fallback'; SourceCode = 0; Location1 = '-2147483646'; Location2 = 'Software\Vendor'; Location3 = 'Value' },
+          [pscustomobject]@{ Name = '<CycleA>'; DefaultValue = '<CycleB>'; SourceCode = [uint32]::MaxValue; Location1 = ''; Location2 = ''; Location3 = '' },
+          [pscustomobject]@{ Name = '<CycleB>'; DefaultValue = '<CycleA>'; SourceCode = [uint32]::MaxValue; Location1 = ''; Location2 = ''; Location3 = '' }
+        )
+      }
+
+      Resolve-AstrumVariables -Value '<Literal>' -Configuration $Configuration -InstallLocation '%ProgramFiles%\App' | Should -Be 'Resolved'
+      Resolve-AstrumVariables -Value '<Dynamic>' -Configuration $Configuration -InstallLocation '%ProgramFiles%\App' | Should -Be '<Dynamic>'
+      Resolve-AstrumVariables -Value '<CycleA>' -Configuration $Configuration -InstallLocation '%ProgramFiles%\App' | Should -Match '^<Cycle[AB]>$'
+    }
+  }
+
+  It 'keeps unresolved ARP identity out of WinGet-facing entries' {
+    InModuleScope AstrumInstallWizard {
+      $Entry = [pscustomobject]@{
+        ProductCode    = '<DynamicKey>'
+        DisplayName    = 'Known display name'
+        DisplayVersion = '<DynamicVersion>'
+        Publisher      = '<DynamicPublisher>'
+      }
+
+      $Projected = ConvertTo-AstrumAppsAndFeaturesEntry -Entry $Entry
+      $Projected.DisplayName | Should -Be 'Known display name'
+      $Projected.PSObject.Properties.Name | Should -Not -Contain 'ProductCode'
+      $Projected.PSObject.Properties.Name | Should -Not -Contain 'DisplayVersion'
+      $Projected.PSObject.Properties.Name | Should -Not -Contain 'Publisher'
+    }
   }
 
 
@@ -261,11 +399,11 @@ Describe 'Astrum InstallWizard metadata and ARP evidence' {
     $LicenseInfo.Diagnostics.Id | Should -Contain 'Astrum.Silent.LicenseAcceptance'
 
     $UserInfo = Get-AstrumInstallWizardInfo -Path $UserInformation
-    $UserInfo.UserInformationBlocksSilent | Should -BeTrue
-    $UserInfo.SupportsSilentInstallation | Should -BeFalse
-    $UserInfo.InstallModes | Should -Be @('interactive')
-    $UserInfo.InstallerSwitches.Count | Should -Be 0
-    $UserInfo.Diagnostics.Id | Should -Contain 'Astrum.Silent.UserInformationDialog'
+    $UserInfo.UserInformationBlocksSilent | Should -BeFalse
+    $UserInfo.SupportsSilentInstallation | Should -BeTrue
+    $UserInfo.InstallModes | Should -Be @('interactive', 'silent')
+    $UserInfo.InstallerSwitches.Silent | Should -Be '/silent'
+    $UserInfo.Diagnostics.Id | Should -Contain 'Astrum.Silent.UserInformationDialogIgnored'
   }
 
   It 'decodes x64 registry, uninstaller, elevation, and requirement options' {
@@ -296,6 +434,26 @@ Describe 'Astrum InstallWizard metadata and ARP evidence' {
     $HiddenArp.Scope | Should -Be 'machine'
     $HiddenArp.AppsAndFeaturesEntries | Should -BeNullOrEmpty
   }
+
+  It 'decodes Windows, Java, .NET, and display requirements without shifting later options' {
+    $RequirementIndexes = Join-Path $Script:AstrumVariants 'RequirementIndexes.exe'
+    $JavaRequireAdmin = Join-Path $Script:AstrumVariants 'JavaRequireAdmin.exe'
+    if (-not (Test-Path -LiteralPath $RequirementIndexes) -or -not (Test-Path -LiteralPath $JavaRequireAdmin)) { Set-ItResult -Skipped -Because 'The controlled Astrum variable-length requirement fixtures are not cached.'; return }
+
+    (Get-FileHash -LiteralPath $RequirementIndexes -Algorithm SHA256).Hash | Should -Be 'EC2BED2B244AEA703FC7262C2324C73911E9277F78C2A28C61B3666C507B9F3A'
+    $Requirements = (Get-AstrumInstallWizardInfo -Path $RequirementIndexes).Requirements
+    $Requirements.WindowsPlatformMask | Should -Be 6
+    $Requirements.MinimumWindows9xVersion | Should -Be 'Windows 98'
+    $Requirements.MinimumWindowsNtVersion | Should -Be 'Windows Server 2003'
+    $Requirements.MinimumResolutionBitsPerPixel | Should -Be 32
+    $Requirements.MinimumDotNetFramework | Should -Be '4.0 Client'
+    $Requirements.MinimumJavaVersion | Should -Be '1.4.2'
+
+    $JavaInfo = Get-AstrumInstallWizardInfo -Path $JavaRequireAdmin
+    $JavaInfo.Requirements.MinimumJavaVersion | Should -Be '1.4.2'
+    $JavaInfo.RequireAdmin | Should -BeTrue
+    $JavaInfo.ElevationRequirement | Should -Be 'elevationRequired'
+  }
 }
 
 Describe 'Astrum InstallWizard extraction' {
@@ -308,6 +466,17 @@ Describe 'Astrum InstallWizard extraction' {
     (Get-Content -LiteralPath (Join-Path $Output 'Data\Alpha.txt') -Raw).TrimEnd("`r", "`n") | Should -Be 'ASTRUM-PAYLOAD-ALPHA-0123456789'
     Test-Path -LiteralPath (Join-Path $Output 'Odd Uninstaller.exe') | Should -BeTrue
     (Get-Item -LiteralPath (Join-Path $Output 'Odd Uninstaller.exe')).Length | Should -BeGreaterThan 0
+  }
+
+  It 'catalogs and extracts advanced resource files through their ordinary payload records' {
+    if (-not (Test-Path -LiteralPath $Script:AstrumResourceFile)) { Set-ItResult -Skipped -Because 'The controlled Astrum resource-file fixture is not cached.'; return }
+    $Info = Get-AstrumInstallWizardInfo -Path $Script:AstrumResourceFile
+    $Info.ResourceFiles.Path | Should -Contain '<ResourceDir>\Resource.txt'
+
+    $Output = Join-Path $TestDrive 'resource-file'
+    $Files = @(Expand-AstrumInstallWizard -Path $Script:AstrumResourceFile -DestinationPath $Output -Name '*Resource.txt' -CollisionAction Error)
+    $Files.Count | Should -Be 1
+    (Get-Content -LiteralPath (Join-Path $Output '_destinations\ResourceDir\Resource.txt') -Raw).TrimEnd("`r", "`n") | Should -Be 'ASTRUM RESOURCE EVIDENCE'
   }
 
   It 'expands a legacy 60-byte file-record layout' {
@@ -364,23 +533,30 @@ Describe 'Astrum installer analyzer and WinGet projection' {
     $WinGet.SuggestedManifestFields.ElevationRequirement | Should -Be 'elevationRequired'
   }
 
-  It 'removes silent suggestions for a compiled User Information dialog' {
+  It 'projects only the exact VM-observed BreakAlube ProductCode' {
+    if (-not (Test-Path -LiteralPath $Script:BreakAlube)) { Set-ItResult -Skipped -Because 'The supplied BreakAlube installer is not cached.'; return }
+    $WinGet = Get-WinGetInstallerAnalysis -Path $Script:BreakAlube
+
+    $WinGet.SuggestedManifestFields.ProductCode | Should -Be 'PC-GINA V1.0.1.5'
+    $WinGet.SuggestedManifestFields.PSObject.Properties.Name | Should -Not -Contain 'AppsAndFeaturesEntries'
+  }
+
+  It 'keeps silent suggestions for a compiled User Information dialog on Modern2 media' {
     $UserInformation = Join-Path $Script:AstrumVariants 'UserInfoDialog.exe'
     if (-not (Test-Path -LiteralPath $UserInformation)) { Set-ItResult -Skipped -Because 'The controlled Astrum User Information fixture is not cached.'; return }
     $WinGet = Get-WinGetInstallerAnalysis -Path $UserInformation
 
-    $WinGet.SuggestedManifestFields.InstallModes | Should -Be @('interactive')
-    $WinGet.SuggestedManifestFields.PSObject.Properties.Name | Should -Not -Contain 'InstallerSwitches'
+    $WinGet.SuggestedManifestFields.InstallModes | Should -Be @('interactive', 'silent')
+    $WinGet.SuggestedManifestFields.InstallerSwitches.Silent | Should -Be '/silent'
   }
 
-  It 'withholds unattended-installation fields for a legacy runtime with no builder subversion' {
+  It 'projects a source-backed silent switch from a legacy runtime option table' {
     if (-not (Test-Path -LiteralPath $Script:AstrumLegacy180)) { Set-ItResult -Skipped -Because 'The Astrum 1.x fixture is not cached.'; return }
     $WinGet = Get-WinGetInstallerAnalysis -Path $Script:AstrumLegacy180
 
     $WinGet.SuggestedManifestFields.InstallerType | Should -Be 'exe'
-    $WinGet.SuggestedManifestFields.PSObject.Properties.Name | Should -Not -Contain 'InstallModes'
-    $WinGet.SuggestedManifestFields.PSObject.Properties.Name | Should -Not -Contain 'InstallerSwitches'
+    $WinGet.SuggestedManifestFields.InstallModes | Should -Be @('interactive', 'silent')
+    $WinGet.SuggestedManifestFields.InstallerSwitches.Silent | Should -Be '/silent'
     $WinGet.SuggestedManifestFields.PSObject.Properties.Name | Should -Not -Contain 'InstallerSuccessCodes'
-    ($WinGet.SuggestedNextSteps -join "`n") | Should -Match 'builder subversion'
   }
 }

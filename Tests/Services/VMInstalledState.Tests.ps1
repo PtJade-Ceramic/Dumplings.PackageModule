@@ -176,8 +176,8 @@ Describe 'VM installed-state comparison script' {
 Describe 'Hyper-V installed-state host controller' {
   It 'imports the inbox Hyper-V module natively in PowerShell Core' {
     $Text = Get-Content -LiteralPath $Script:HostScript -Raw
-    $Text | Should -Match ([regex]::Escape("`$env:PSModulePath += ';C:\WINDOWS\system32\WindowsPowerShell\v1.0\Modules'"))
     $Text | Should -Match ([regex]::Escape('Import-Module Hyper-V -PassThru'))
+    $Text | Should -Not -Match ([regex]::Escape('$env:PSModulePath'))
     $Text | Should -Not -Match ([regex]::Escape('-UseWindowsPowerShell'))
   }
 

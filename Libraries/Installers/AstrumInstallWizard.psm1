@@ -16,9 +16,10 @@
 #
 #   PE32 setup runtime
 #   +-- PE manifest/version resources
+#   +-- NUL/whitespace-delimited native command-line option table
 #   +-- protected configuration block
 #   |   `-- registry tree, shortcuts, operations, requirements, and fixed metadata
-#   +-- optional resource and uninstaller gzip members
+#   +-- optional generated-uninstaller gzip member
 #   +-- installation-item catalog
 #   +-- repeated file records
 #   |   +-- 60-byte 1.x or 64-byte 2.x little-endian descriptor
@@ -26,6 +27,7 @@
 #   |   +-- bit-permuted destination name
 #   |   +-- volume-offset table
 #   |   `-- stored bytes or one gzip member
+#   |       `<ResourceDir>\...` destinations are early builder Resource files
 #   +-- big-endian footer route table (0xE8 bytes in 1.x, 0xEC bytes in 2.x)
 #   +-- footer pointer + optional signature block
 #   `-- optional 1.95+/2.x trailer: 3E 2D 1C 0B 78 56 34 12
@@ -58,20 +60,27 @@
 #   footer + 0xC8/0xCC                 4  Aggregate installed-size evidence (1.x/2.x)
 #   footer + 0xE4/0xE8                 4  Self pointer, BE UInt32 (1.x/2.x)
 #
-# Fixed option offsets are relative to the byte after the uninstaller command:
+# Modern option offsets are relative to the byte after the uninstaller command. Fields after the
+# variable-length Java version string are relative to the byte following its NUL terminator:
 #
 #   Offset       Size/order  Field
 #   -----------  ----------  ---------------------------------------------
 #   +0x48        4 / BE      minimum CPU speed in MHz
 #   +0x58        4 / BE      minimum memory in MiB
+#   +0x5C        4 / BE      Windows-family bit mask
+#   +0x64/+0x68  4+4 / BE    minimum Windows NT major and minor
 #   +0x70        2+2 / BE    minimum DirectX major and minor
-#   +0x74        4+4 / BE    minimum display width and height
-#   +0x94..0x9C  3x4 / LE    wave, MIDI, and joystick requirements
-#   +0xA0        4 / LE      User Information field flags
-#   +0xF0        4 / LE      silent-by-default flag
-#   +0xF4        4 / LE      no-generated-uninstaller flag
-#   +0x131       4 / LE      x64-compliance flag
-#   +0x135       4 / LE      require-administrator flag
+#   +0x74        4+4+4 / BE  minimum display width, height, and bits per pixel
+#   +0x80        4 / BE      minimum .NET Framework selector
+#   +0x84        variable    NUL-terminated minimum Java version
+#   JavaEnd+0x0C 4 / BE      wave-playback requirement
+#   JavaEnd+0x10 4 / BE      MIDI-playback requirement
+#   JavaEnd+0x14 4 / BE      joystick requirement
+#   JavaEnd+0x18 4 / BE      User Information field flags
+#   JavaEnd+0x68 4 / BE      silent-by-default flag
+#   JavaEnd+0x6C 4 / BE      no-generated-uninstaller flag
+#   JavaEnd+0xA9 4 / BE      x64-compliance flag
+#   JavaEnd+0xAD 4 / BE      require-administrator flag
 #   end-29       1           direct license approval
 #   end-25       1           prohibit silent installation without approval
 #
@@ -95,7 +104,11 @@ foreach ($CatalogFormat in $Script:AstrumFormatCatalog.Formats) {
 }
 $Script:AstrumConfigurationProfiles = @{}
 foreach ($Entry in $Script:AstrumFormatCatalog.ConfigurationProfiles.GetEnumerator()) { $Script:AstrumConfigurationProfiles[[string]$Entry.Key] = [pscustomobject]$Entry.Value }
+$Script:AstrumOperationSemantics = [pscustomobject]$Script:AstrumFormatCatalog.OperationSemantics
+$Script:AstrumVariableSemantics = [pscustomobject]$Script:AstrumFormatCatalog.VariableSemantics
 foreach ($Format in $Script:AstrumFormatsByFooterLength.Values) {
+  if ($Format.InteractiveOperationRoute -notin 'LegacyWithoutTail', 'CurrentWithCondition') { throw "Astrum format '$($Format.Id)' declares an unsupported interactive-operation route." }
+  if ([int]$Format.InteractiveActionCount -lt 1 -or [int]$Format.InteractiveActionCount -gt @($Script:AstrumOperationSemantics.InteractiveActions).Count) { throw "Astrum format '$($Format.Id)' declares an invalid interactive-action count." }
   foreach ($ProfileId in @($Format.DefaultConfigurationProfile, $Format.RuntimeWordProfile) | Where-Object { $_ }) {
     if (-not $Script:AstrumConfigurationProfiles.ContainsKey([string]$ProfileId)) { throw "Astrum format '$($Format.Id)' references missing configuration profile '$ProfileId'." }
   }
@@ -489,6 +502,46 @@ function Read-AstrumConfigurationString {
   return $Value
 }
 
+function Get-AstrumOperationSemanticName {
+  <#
+  .SYNOPSIS
+    Resolve a compiled Astrum enum value through the source-backed builder ordering.
+  .PARAMETER Code
+    Zero-based UInt32 value serialized by the Astrum compiler.
+  .PARAMETER Names
+    Ordered names recovered from the corresponding builder control and help topic.
+  .PARAMETER MaximumCount
+    Optional generation-specific number of supported values. Astrum 1.x, for example, exposes only the first eight interactive actions.
+  .OUTPUTS
+    The exact builder label, or null when the value is unsupported by the selected generation.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory)][uint32]$Code,
+    [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Names,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumCount = $Names.Count
+  )
+
+  if ($Code -ge [uint32]$MaximumCount -or $Code -ge [uint32]$Names.Count) { return $null }
+  return $Names[[int]$Code]
+}
+
+function Get-AstrumVariableSourceName {
+  <#
+  .SYNOPSIS
+    Resolve the serialized variable-source enum through the builder's source list.
+  .PARAMETER Code
+    Unsigned source value stored in a compiled variable record. Astrum serializes Nowhere as UInt32.MaxValue.
+  .OUTPUTS
+    Registry, INI, Find file location, Nowhere, or null for an unknown value.
+  #>
+  [OutputType([string])]
+  param ([Parameter(Mandatory)][uint32]$Code)
+
+  $Key = [string]$Code
+  return $Script:AstrumVariableSemantics.Sources.ContainsKey($Key) ? [string]$Script:AstrumVariableSemantics.Sources[$Key] : $null
+}
+
 function Read-AstrumConfigurationCondition {
   <#
   .SYNOPSIS
@@ -505,13 +558,18 @@ function Read-AstrumConfigurationCondition {
   $Count = Read-AstrumConfigurationCount -Reader $Reader -TableName 'condition-term'
   $Terms = [Collections.Generic.List[object]]::new()
   for ($Index = 0; $Index -lt $Count; $Index++) {
+    $Left = Read-AstrumConfigurationString -Reader $Reader
+    $Operator = Read-AstrumConfigurationUInt32 -Reader $Reader
+    $Right = Read-AstrumConfigurationString -Reader $Reader
     $Terms.Add([pscustomobject][ordered]@{
-        Left     = Read-AstrumConfigurationString -Reader $Reader
-        Operator = Read-AstrumConfigurationUInt32 -Reader $Reader
-        Right    = Read-AstrumConfigurationString -Reader $Reader
+        Left         = $Left
+        Operator     = $Operator
+        OperatorName = Get-AstrumOperationSemanticName -Code $Operator -Names @($Script:AstrumOperationSemantics.ConditionOperators)
+        Right        = $Right
       })
   }
-  return [pscustomobject][ordered]@{ Kind = $Kind; Terms = @($Terms) }
+  # The serialized leading value is the builder's osmask attribute. Preserve Kind for existing callers.
+  return [pscustomobject][ordered]@{ Kind = $Kind; OperatingSystemMask = $Kind; Terms = @($Terms) }
 }
 
 function Read-AstrumOperationTail {
@@ -521,14 +579,14 @@ function Read-AstrumOperationTail {
   .PARAMETER Reader
     Mutable decoded-configuration cursor.
   .OUTPUTS
-    A parsed 2.x condition, or null after consuming the observed 1.x UInt32 tail.
+    An envelope containing a parsed 2.x condition or the preserved 1.x UInt32 tail.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)]$Reader)
 
   switch ([string]$Reader.Format.OperationTailRoute) {
-    'ObservedUInt32' { $null = Read-AstrumConfigurationUInt32 -Reader $Reader; return $null }
-    'Condition' { return Read-AstrumConfigurationCondition -Reader $Reader }
+    'ObservedUInt32' { return [pscustomobject]@{ Condition = $null; ObservedValue = Read-AstrumConfigurationUInt32 -Reader $Reader } }
+    'Condition' { return [pscustomobject]@{ Condition = Read-AstrumConfigurationCondition -Reader $Reader; ObservedValue = $null } }
     default { throw "Astrum format '$($Reader.Format.Id)' uses an unsupported operation-tail route '$($Reader.Format.OperationTailRoute)'." }
   }
 }
@@ -607,7 +665,7 @@ function Read-AstrumConfigurationProfileOptions {
   .PARAMETER ConfigurationProfile
     Configuration profile selected from AstrumInstallWizardFormatCatalog.psd1.
   .OUTPUTS
-    Stable Requirements and Configuration objects whose values are null when the selected profile does not define that field.
+    Stable Requirements and Configuration objects plus a byte-range map distinguishing assigned profile fields from opaque option bytes.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -617,7 +675,7 @@ function Read-AstrumConfigurationProfileOptions {
   )
 
   $Requirements = [ordered]@{}
-  foreach ($Name in 'MinimumCpuSpeedMHz', 'CpuManufacturerCode', 'CpuVendorMask', 'CpuFeatureFlags', 'MinimumMemoryMiB', 'MinimumWindows9xBuild', 'MinimumNtServicePack', 'MinimumDirectXMajor', 'MinimumDirectXMinor', 'MinimumResolutionWidth', 'MinimumResolutionHeight', 'RequiresWavePlayback', 'RequiresMidiPlayback', 'RequiresJoystick') { $Requirements[$Name] = $null }
+  foreach ($Name in 'MinimumCpuSpeedMHz', 'CpuManufacturerCode', 'CpuVendorMask', 'CpuFeatureFlags', 'MinimumMemoryMiB', 'WindowsPlatformMask', 'MinimumWindows9xVersion', 'MinimumWindows9xBuild', 'MinimumWindowsNtMajor', 'MinimumWindowsNtMinor', 'MinimumWindowsNtVersion', 'MinimumNtServicePack', 'MinimumDirectXMajor', 'MinimumDirectXMinor', 'MinimumResolutionWidth', 'MinimumResolutionHeight', 'MinimumResolutionBitsPerPixel', 'MinimumDotNetFrameworkCode', 'MinimumDotNetFramework', 'MinimumJavaVersion', 'RequiresWavePlayback', 'RequiresMidiPlayback', 'RequiresJoystick') { $Requirements[$Name] = $null }
   $Configuration = [ordered]@{
     UserInformationFlags       = $null
     SilentInstallationDefault  = $null
@@ -629,25 +687,59 @@ function Read-AstrumConfigurationProfileOptions {
   }
   if ($ConfigurationProfile.OptionRoute -notin 'Opaque', 'SparseModern2') { throw "Astrum configuration profile '$($ConfigurationProfile.Id)' uses an unsupported option route '$($ConfigurationProfile.OptionRoute)'." }
 
+  # Track only bytes whose meaning is established by controlled builder output. This preserves the
+  # unknown portions as bounded evidence without misreporting the complete option block as unread.
+  $OptionBlockSize = $Bytes.Length - $BaseOffset
+  $AssignedBytes = [bool[]]::new($OptionBlockSize)
+  $AssignedFields = [Collections.Generic.List[object]]::new()
+  $AfterJavaVersionOffset = $null
+
   foreach ($Field in @($ConfigurationProfile.OptionFields)) {
-    $Value = switch ([string]$Field.Origin) {
-      'Option' {
-        switch ([string]$Field.Type) {
-          'UInt32' { Read-AstrumConfigurationOptionUInt32 -Bytes $Bytes -BaseOffset $BaseOffset -RelativeOffset ([int]$Field.Offset) -Endian ([string]$Field.Endian) }
-          'UInt16' {
-            if ($Field.Endian -cne 'BigEndian') { throw "Astrum option '$($Field.Name)' declares an unsupported UInt16 byte order." }
-            Read-AstrumConfigurationOptionUInt16 -Bytes $Bytes -BaseOffset $BaseOffset -RelativeOffset ([int]$Field.Offset)
-          }
-          'BooleanUInt32' { ConvertTo-AstrumConfigurationBoolean (Read-AstrumConfigurationOptionUInt32 -Bytes $Bytes -BaseOffset $BaseOffset -RelativeOffset ([int]$Field.Offset) -Endian ([string]$Field.Endian)) }
-          default { throw "Astrum option '$($Field.Name)' uses an unsupported type '$($Field.Type)'." }
-        }
+    $FixedFieldSize = switch ([string]$Field.Type) {
+      'UInt32' { 4 }
+      'BooleanUInt32' { 4 }
+      'UInt16' { 2; break }
+      'BooleanByte' { 1; break }
+      'NullTerminatedString' { 0; break }
+      default { throw "Astrum option '$($Field.Name)' uses an unsupported type '$($Field.Type)'." }
+    }
+    $RelativeOffset = switch ([string]$Field.Origin) {
+      'Option' { [int]$Field.Offset }
+      'AfterJavaVersion' {
+        if ($null -eq $AfterJavaVersionOffset) { throw "Astrum option '$($Field.Name)' depends on a Java-version boundary that has not been decoded." }
+        [int]$AfterJavaVersionOffset + [int]$Field.Offset
       }
-      'End' {
-        if ($Field.Type -cne 'BooleanByte') { throw "Astrum end-relative option '$($Field.Name)' uses an unsupported type '$($Field.Type)'." }
-        $Distance = [int]$Field.Distance
-        $Bytes.Length -ge $Distance -and $Bytes[$Bytes.Length - $Distance] -eq 1
-      }
+      'End' { $Bytes.Length - [int]$Field.Distance - $BaseOffset }
       default { throw "Astrum option '$($Field.Name)' uses an unsupported origin '$($Field.Origin)'." }
+    }
+    $FieldSize = $FixedFieldSize
+    if ($Field.Type -ceq 'NullTerminatedString') {
+      $StringOffset = $BaseOffset + $RelativeOffset
+      if ($RelativeOffset -lt 0 -or $StringOffset -ge $Bytes.Length) { throw "Astrum option '$($Field.Name)' is outside the decoded option block." }
+      $StringLimit = [Math]::Min($Bytes.Length, $StringOffset + $Script:AstrumMaximumStringBytes + 1)
+      $StringEnd = $StringOffset
+      while ($StringEnd -lt $StringLimit -and $Bytes[$StringEnd] -ne 0) { $StringEnd++ }
+      if ($StringEnd -ge $StringLimit) { throw "Astrum option '$($Field.Name)' is unterminated or oversized." }
+      $FieldSize = $StringEnd - $StringOffset + 1
+      $Value = $Script:AstrumAnsi.GetString($Bytes, $StringOffset, $FieldSize - 1)
+      if ($Field.Name -ceq 'MinimumJavaVersion') { $AfterJavaVersionOffset = $RelativeOffset + $FieldSize }
+    } elseif ($RelativeOffset -lt 0 -or $FixedFieldSize -gt $OptionBlockSize - $RelativeOffset) {
+      $Value = $null
+    } else {
+      $Value = switch ([string]$Field.Type) {
+        'UInt32' { Read-AstrumConfigurationOptionUInt32 -Bytes $Bytes -BaseOffset $BaseOffset -RelativeOffset $RelativeOffset -Endian ([string]$Field.Endian) }
+        'UInt16' {
+          if ($Field.Endian -cne 'BigEndian') { throw "Astrum option '$($Field.Name)' declares an unsupported UInt16 byte order." }
+          Read-AstrumConfigurationOptionUInt16 -Bytes $Bytes -BaseOffset $BaseOffset -RelativeOffset $RelativeOffset
+        }
+        'BooleanUInt32' { ConvertTo-AstrumConfigurationBoolean (Read-AstrumConfigurationOptionUInt32 -Bytes $Bytes -BaseOffset $BaseOffset -RelativeOffset $RelativeOffset -Endian ([string]$Field.Endian)) }
+        'BooleanByte' { $Bytes[$BaseOffset + $RelativeOffset] -eq 1 }
+        default { throw "Astrum option '$($Field.Name)' uses an unsupported type '$($Field.Type)'." }
+      }
+    }
+    if ($RelativeOffset -ge 0 -and $FieldSize -le $OptionBlockSize - $RelativeOffset) {
+      for ($ByteIndex = $RelativeOffset; $ByteIndex -lt $RelativeOffset + $FieldSize; $ByteIndex++) { $AssignedBytes[$ByteIndex] = $true }
+      $AssignedFields.Add([pscustomobject][ordered]@{ Name = [string]$Field.Name; Offset = $RelativeOffset; Size = $FieldSize })
     }
     switch ([string]$Field.Group) {
       'Requirements' {
@@ -662,7 +754,64 @@ function Read-AstrumConfigurationProfileOptions {
     }
   }
 
-  return [pscustomobject]@{ Requirements = [pscustomobject]$Requirements; Configuration = [pscustomobject]$Configuration }
+  # The builder stores Windows selectors as a bit mask plus NT major/minor values, .NET as a
+  # dropdown index, and Java as the selected version string. Keep the raw fields alongside the
+  # source-backed labels so future profiles can be compared without lossy normalization.
+  $Requirements.MinimumWindows9xVersion = switch ([uint32]$Requirements.WindowsPlatformMask -band 0x0B) {
+    0x08 { 'Windows ME' }
+    0x02 { 'Windows 98' }
+    0x01 { 'Windows 95' }
+    default { $null }
+  }
+  if (([uint32]$Requirements.WindowsPlatformMask -band 0x04) -ne 0) {
+    $NtVersion = '{0}.{1}' -f [uint32]$Requirements.MinimumWindowsNtMajor, [uint32]$Requirements.MinimumWindowsNtMinor
+    $Requirements.MinimumWindowsNtVersion = switch ($NtVersion) {
+      '4.0' { 'Windows NT 4.0' }
+      '5.0' { 'Windows 2000' }
+      '5.1' { 'Windows XP' }
+      '5.2' { 'Windows Server 2003' }
+      '6.0' { 'Windows Vista / Server 2008' }
+      '6.1' { 'Windows 7 / Server 2008 R2' }
+      default { $null }
+    }
+  }
+  $Requirements.MinimumDotNetFramework = switch ([uint32]$Requirements.MinimumDotNetFrameworkCode) {
+    1 { '1.0' }
+    2 { '1.1' }
+    3 { '2.0' }
+    4 { '3.0' }
+    5 { '3.5' }
+    6 { '3.5 SP1' }
+    7 { '4.0 Client' }
+    8 { '4.0 Full' }
+    default { $null }
+  }
+  if ([string]::IsNullOrWhiteSpace([string]$Requirements.MinimumJavaVersion)) { $Requirements.MinimumJavaVersion = $null }
+
+  # Collapse adjacent opaque bytes into ranges so callers can compare layouts without retaining a
+  # second copy of the decoded configuration or materializing one evidence object per byte.
+  $UnassignedRanges = [Collections.Generic.List[object]]::new()
+  for ($Index = 0; $Index -lt $OptionBlockSize; ) {
+    if ($AssignedBytes[$Index]) { $Index++; continue }
+    $Start = $Index
+    $NonZeroByteCount = 0
+    while ($Index -lt $OptionBlockSize -and -not $AssignedBytes[$Index]) {
+      if ($Bytes[$BaseOffset + $Index] -ne 0) { $NonZeroByteCount++ }
+      $Index++
+    }
+    $UnassignedRanges.Add([pscustomobject][ordered]@{ Offset = $Start; Length = $Index - $Start; NonZeroByteCount = $NonZeroByteCount })
+  }
+  $AssignedByteCount = 0
+  foreach ($AssignedByte in $AssignedBytes) { if ($AssignedByte) { $AssignedByteCount++ } }
+  $OptionBlockEvidence = [pscustomobject][ordered]@{
+    Offset            = $BaseOffset
+    Size              = $OptionBlockSize
+    AssignedByteCount = $AssignedByteCount
+    AssignedFields    = @($AssignedFields)
+    UnassignedRanges  = @($UnassignedRanges)
+  }
+
+  return [pscustomobject]@{ Requirements = [pscustomobject]$Requirements; Configuration = [pscustomobject]$Configuration; OptionBlockEvidence = $OptionBlockEvidence }
 }
 
 function Read-AstrumRegistryTree {
@@ -746,27 +895,114 @@ function Read-AstrumConfiguration {
   $Shortcuts = [Collections.Generic.List[object]]::new()
   $Count = Read-AstrumConfigurationCount -Reader $Reader -TableName 'shortcut'
   for ($Index = 0; $Index -lt $Count; $Index++) {
-    $Shortcuts.Add([pscustomobject]@{ Target = Read-AstrumConfigurationString $Reader; LinkName = Read-AstrumConfigurationString $Reader; Arguments = Read-AstrumConfigurationString $Reader; WorkingDirectory = Read-AstrumConfigurationString $Reader; Icon = Read-AstrumConfigurationString $Reader; Condition = Read-AstrumOperationTail $Reader })
+    $Record = [ordered]@{ Target = Read-AstrumConfigurationString $Reader; LinkName = Read-AstrumConfigurationString $Reader; Arguments = Read-AstrumConfigurationString $Reader; WorkingDirectory = Read-AstrumConfigurationString $Reader; Icon = Read-AstrumConfigurationString $Reader }
+    $Tail = Read-AstrumOperationTail $Reader
+    $Record.Condition = $Tail.Condition
+    $Record.ObservedOperationTail = $Tail.ObservedValue
+    $Shortcuts.Add([pscustomobject]$Record)
   }
   $IniOperations = [Collections.Generic.List[object]]::new()
   $Count = Read-AstrumConfigurationCount -Reader $Reader -TableName 'INI-operation'
-  for ($Index = 0; $Index -lt $Count; $Index++) { $IniOperations.Add([pscustomobject]@{ Path = Read-AstrumConfigurationString $Reader; Section = Read-AstrumConfigurationString $Reader; Value = Read-AstrumConfigurationString $Reader; Condition = Read-AstrumOperationTail $Reader }) }
+  for ($Index = 0; $Index -lt $Count; $Index++) {
+    $Record = [ordered]@{ Path = Read-AstrumConfigurationString $Reader; Section = Read-AstrumConfigurationString $Reader; Value = Read-AstrumConfigurationString $Reader }
+    $Tail = Read-AstrumOperationTail $Reader
+    $Record.Condition = $Tail.Condition
+    $Record.ObservedOperationTail = $Tail.ObservedValue
+    $IniOperations.Add([pscustomobject]$Record)
+  }
   $TextOperations = [Collections.Generic.List[object]]::new()
   $Count = Read-AstrumConfigurationCount -Reader $Reader -TableName 'text-operation'
-  for ($Index = 0; $Index -lt $Count; $Index++) { $TextOperations.Add([pscustomobject]@{ Operation = Read-AstrumConfigurationUInt32 $Reader; Path = Read-AstrumConfigurationString $Reader; Search = Read-AstrumConfigurationString $Reader; Value = Read-AstrumConfigurationString $Reader; Condition = Read-AstrumOperationTail $Reader }) }
+  for ($Index = 0; $Index -lt $Count; $Index++) {
+    $OperationCode = Read-AstrumConfigurationUInt32 $Reader
+    $Record = [ordered]@{ Operation = $OperationCode; OperationName = Get-AstrumOperationSemanticName -Code $OperationCode -Names @($Script:AstrumOperationSemantics.TextActions); Path = Read-AstrumConfigurationString $Reader; Search = Read-AstrumConfigurationString $Reader; Value = Read-AstrumConfigurationString $Reader }
+    $Tail = Read-AstrumOperationTail $Reader
+    $Record.Condition = $Tail.Condition
+    $Record.ObservedOperationTail = $Tail.ObservedValue
+    $TextOperations.Add([pscustomobject]$Record)
+  }
   $FileOperations = [Collections.Generic.List[object]]::new()
   $Count = Read-AstrumConfigurationCount -Reader $Reader -TableName 'advanced-file-operation'
-  for ($Index = 0; $Index -lt $Count; $Index++) { $FileOperations.Add([pscustomobject]@{ ActionCode = Read-AstrumConfigurationUInt32 $Reader; Source = Read-AstrumConfigurationString $Reader; Destination = Read-AstrumConfigurationString $Reader; Timing = Read-AstrumConfigurationUInt32 $Reader; Condition = Read-AstrumOperationTail $Reader }) }
+  for ($Index = 0; $Index -lt $Count; $Index++) {
+    $ActionCode = Read-AstrumConfigurationUInt32 $Reader
+    $Source = Read-AstrumConfigurationString $Reader
+    $Destination = Read-AstrumConfigurationString $Reader
+    $Timing = Read-AstrumConfigurationUInt32 $Reader
+    $Record = [ordered]@{ ActionCode = $ActionCode; ActionName = Get-AstrumOperationSemanticName -Code $ActionCode -Names @($Script:AstrumOperationSemantics.FileActions); Source = $Source; Destination = $Destination; Timing = $Timing; TimingName = Get-AstrumOperationSemanticName -Code $Timing -Names @($Script:AstrumOperationSemantics.Timings) }
+    $Tail = Read-AstrumOperationTail $Reader
+    $Record.Condition = $Tail.Condition
+    $Record.ObservedOperationTail = $Tail.ObservedValue
+    $FileOperations.Add([pscustomobject]$Record)
+  }
   $Variables = [Collections.Generic.List[object]]::new()
   $Count = Read-AstrumConfigurationCount -Reader $Reader -TableName 'variable'
-  for ($Index = 0; $Index -lt $Count; $Index++) { $Variables.Add([pscustomobject]@{ Name = Read-AstrumConfigurationString $Reader; Type = Read-AstrumConfigurationUInt32 $Reader; Flags = Read-AstrumConfigurationUInt32 $Reader; Value = Read-AstrumConfigurationString $Reader; Argument1 = Read-AstrumConfigurationString $Reader; Argument2 = Read-AstrumConfigurationString $Reader; Argument3 = Read-AstrumConfigurationString $Reader; Operation = Read-AstrumConfigurationUInt32 $Reader }) }
+  for ($Index = 0; $Index -lt $Count; $Index++) {
+    # The project XML calls these fields type, get-from, default-value, location1..3, and flags.
+    # Keep that model here instead of the earlier generic Flags/Operation names, which swapped the
+    # source enum and option bit mask and made runtime-backed variables look like operations.
+    $Name = Read-AstrumConfigurationString $Reader
+    $TypeCode = Read-AstrumConfigurationUInt32 $Reader
+    $SourceCode = Read-AstrumConfigurationUInt32 $Reader
+    $DefaultValue = Read-AstrumConfigurationString $Reader
+    $Location1 = Read-AstrumConfigurationString $Reader
+    $Location2 = Read-AstrumConfigurationString $Reader
+    $Location3 = Read-AstrumConfigurationString $Reader
+    $VariableFlags = Read-AstrumConfigurationUInt32 $Reader
+    $Variables.Add([pscustomobject][ordered]@{
+        Name            = $Name
+        TypeCode        = $TypeCode
+        TypeName        = Get-AstrumOperationSemanticName -Code $TypeCode -Names @($Script:AstrumVariableSemantics.Types)
+        SourceCode      = $SourceCode
+        SourceName      = Get-AstrumVariableSourceName -Code $SourceCode
+        DefaultValue    = $DefaultValue
+        Location1       = $Location1
+        Location2       = $Location2
+        Location3       = $Location3
+        Flags           = $VariableFlags
+        StoreDriveOnly  = ($VariableFlags -band [uint32]$Script:AstrumVariableSemantics.Flags.StoreDriveOnly) -ne 0
+        SetTrueIfExists = ($VariableFlags -band [uint32]$Script:AstrumVariableSemantics.Flags.SetTrueIfExists) -ne 0
+        UserVisible     = ($VariableFlags -band [uint32]$Script:AstrumVariableSemantics.Flags.UserVisible) -ne 0
+      })
+  }
   $InteractiveOperations = [Collections.Generic.List[object]]::new()
   $Count = Read-AstrumConfigurationCount -Reader $Reader -TableName 'advanced-interactive-operation'
-  for ($Index = 0; $Index -lt $Count; $Index++) { $InteractiveOperations.Add([pscustomobject]@{ ActionCode = Read-AstrumConfigurationUInt32 $Reader; File = Read-AstrumConfigurationString $Reader; Arguments = Read-AstrumConfigurationString $Reader; WorkingDirectory = Read-AstrumConfigurationString $Reader; Timing = Read-AstrumConfigurationUInt32 $Reader; ExecuteCount = Read-AstrumConfigurationUInt32 $Reader; Flags = Read-AstrumConfigurationUInt32 $Reader; CustomMessage = Read-AstrumConfigurationString $Reader; Condition = Read-AstrumOperationTail $Reader }) }
-  $ResourceOperations = [Collections.Generic.List[object]]::new()
-  if ($Format.HasAdvancedResourceTable) {
-    $Count = Read-AstrumConfigurationCount -Reader $Reader -TableName 'advanced-resource-operation'
-    for ($Index = 0; $Index -lt $Count; $Index++) { $ResourceOperations.Add([pscustomobject]@{ ObservedUInt32A = Read-AstrumConfigurationUInt32 $Reader; ObservedUInt32B = Read-AstrumConfigurationUInt32 $Reader; ObservedStringA = Read-AstrumConfigurationString $Reader; ObservedStringB = Read-AstrumConfigurationString $Reader; ObservedStringC = Read-AstrumConfigurationString $Reader; ObservedStringD = Read-AstrumConfigurationString $Reader; Condition = Read-AstrumOperationTail $Reader }) }
+  for ($Index = 0; $Index -lt $Count; $Index++) {
+    $ActionCode = Read-AstrumConfigurationUInt32 $Reader
+    $File = Read-AstrumConfigurationString $Reader
+    $Arguments = Read-AstrumConfigurationString $Reader
+    $WorkingDirectory = Read-AstrumConfigurationString $Reader
+    $Timing = Read-AstrumConfigurationUInt32 $Reader
+    $Record = [ordered]@{ ActionCode = $ActionCode; ActionName = Get-AstrumOperationSemanticName -Code $ActionCode -Names @($Script:AstrumOperationSemantics.InteractiveActions) -MaximumCount ([int]$Format.InteractiveActionCount); File = $File; Arguments = $Arguments; WorkingDirectory = $WorkingDirectory; Timing = $Timing; TimingName = Get-AstrumOperationSemanticName -Code $Timing -Names @($Script:AstrumOperationSemantics.Timings); ExecuteCount = Read-AstrumConfigurationUInt32 $Reader }
+    # Astrum 1.x stops this record after ExecuteCount. Reading the later flags/message/tail fields
+    # consumes the beginning of ApplicationName when an old package contains an interactive action.
+    # Astrum 2.x adds those fields and the normal condition envelope.
+    switch ([string]$Reader.Format.InteractiveOperationRoute) {
+      'LegacyWithoutTail' {
+        $Record.Flags = $null
+        $Record.CustomMessage = $null
+        $Record.Condition = $null
+        $Record.ObservedOperationTail = $null
+      }
+      'CurrentWithCondition' {
+        $Record.Flags = Read-AstrumConfigurationUInt32 $Reader
+        $Record.CustomMessage = Read-AstrumConfigurationString $Reader
+        $Tail = Read-AstrumOperationTail $Reader
+        $Record.Condition = $Tail.Condition
+        $Record.ObservedOperationTail = $Tail.ObservedValue
+      }
+      default { throw "Astrum format '$($Reader.Format.Id)' uses an unsupported interactive-operation route '$($Reader.Format.InteractiveOperationRoute)'." }
+    }
+    $InteractiveOperations.Add([pscustomobject]$Record)
+  }
+  $PostInteractiveRecords = [Collections.Generic.List[object]]::new()
+  if ($Format.HasPostInteractiveTable) {
+    $Count = Read-AstrumConfigurationCount -Reader $Reader -TableName 'post-interactive'
+    for ($Index = 0; $Index -lt $Count; $Index++) {
+      $Record = [ordered]@{ ObservedUInt32A = Read-AstrumConfigurationUInt32 $Reader; ObservedUInt32B = Read-AstrumConfigurationUInt32 $Reader; ObservedStringA = Read-AstrumConfigurationString $Reader; ObservedStringB = Read-AstrumConfigurationString $Reader; ObservedStringC = Read-AstrumConfigurationString $Reader; ObservedStringD = Read-AstrumConfigurationString $Reader }
+      $Tail = Read-AstrumOperationTail $Reader
+      $Record.Condition = $Tail.Condition
+      $Record.ObservedOperationTail = $Tail.ObservedValue
+      $PostInteractiveRecords.Add([pscustomobject]$Record)
+    }
   }
 
   # Profile selection is structural. Modern media prefixes this region with a bounded runtime word;
@@ -817,55 +1053,58 @@ function Read-AstrumConfiguration {
   $Options = $ProfileOptions.Configuration
 
   return [pscustomobject][ordered]@{
-    RuntimeFormat                = $RuntimeFormat
-    FormatId                     = [string]$Format.Id
-    ConfigurationProfile         = [string]$ConfigurationProfile.Id
-    ConfigurationProfileRoute    = [string]$Format.ConfigurationProfileRoute
-    OptionRoute                  = [string]$ConfigurationProfile.OptionRoute
-    SilentRoute                  = [string]$ConfigurationProfile.SilentRoute
-    ApplicationName              = $ApplicationName
-    InternalApplicationName      = $ApplicationName2
-    CompanyName                  = $CompanyName
-    InternalCompanyName          = $CompanyName2
-    InstallPath                  = $InstallPath
-    InstallPathFlags             = $InstallPathFlags
-    InstallRegistryRoot          = $InstallRegistryRoot
-    InstallRegistryPath          = $InstallRegistryPath
-    InstallRegistryValue         = $InstallRegistryValue
-    ShortcutPath                 = $ShortcutPath
-    InterfaceStrings             = @($InterfaceStrings)
-    UninstallRegistryRoot        = $UninstallRegistryRoot
-    PreviousVersionRegistryPath  = $FixedStrings[0]
-    PreviousVersionRegistryValue = $FixedStrings[1]
-    PreviousVersionMinimum       = $FixedStrings[2]
-    ApplicationVersion           = $FixedStrings[3]
-    FileVersion                  = $FixedStrings[4]
-    InstallIcon                  = $InstallIcon
-    LanguageDialogTitle          = $LanguageDialogTitle
-    LanguageDialogText           = $LanguageDialogText
-    DefaultLanguage              = $DefaultLanguage
-    UninstallerName              = $UninstallerName
-    UninstallerCommand           = $UninstallerCommand
-    RegistryWrites               = @($RegistryWrites)
-    Shortcuts                    = @($Shortcuts)
-    IniOperations                = @($IniOperations)
-    TextOperations               = @($TextOperations)
-    FileOperations               = @($FileOperations)
-    Variables                    = @($Variables)
-    InteractiveOperations        = @($InteractiveOperations)
-    ResourceOperations           = @($ResourceOperations)
-    Requirements                 = $Requirements
-    UserInformationFlags         = $Options.UserInformationFlags
-    SilentInstallationDefault    = $Options.SilentInstallationDefault
-    NoUninstallation             = $Options.NoUninstallation
-    X64ComplianceMode            = $Options.X64ComplianceMode
-    RequireAdmin                 = $Options.RequireAdmin
-    DirectLicenseApproval        = $Options.DirectLicenseApproval
-    ProhibitSilentInstallation   = $Options.ProhibitSilentInstallation
-    OptionOffset                 = $OptionOffset
-    ConsumedBytes                = $OptionOffset
-    RemainingBytes               = $Reader.Bytes.Length - $OptionOffset
-    DecodedBytes                 = $Bytes
+    RuntimeFormat                            = $RuntimeFormat
+    FormatId                                 = [string]$Format.Id
+    ConfigurationProfile                     = [string]$ConfigurationProfile.Id
+    ConfigurationProfileObservedVersionRange = [string]$ConfigurationProfile.ObservedVersionRange
+    ConfigurationProfileRoute                = [string]$Format.ConfigurationProfileRoute
+    OptionRoute                              = [string]$ConfigurationProfile.OptionRoute
+    SilentRoute                              = [string]$ConfigurationProfile.SilentRoute
+    UserInformationBlocksSilent              = $ConfigurationProfile.UserInformationBlocksSilent -ne $false ? $true : $false
+    UserInformationEvidence                  = [string]$ConfigurationProfile.UserInformationEvidence
+    ApplicationName                          = $ApplicationName
+    InternalApplicationName                  = $ApplicationName2
+    CompanyName                              = $CompanyName
+    InternalCompanyName                      = $CompanyName2
+    InstallPath                              = $InstallPath
+    InstallPathFlags                         = $InstallPathFlags
+    InstallRegistryRoot                      = $InstallRegistryRoot
+    InstallRegistryPath                      = $InstallRegistryPath
+    InstallRegistryValue                     = $InstallRegistryValue
+    ShortcutPath                             = $ShortcutPath
+    InterfaceStrings                         = @($InterfaceStrings)
+    UninstallRegistryRoot                    = $UninstallRegistryRoot
+    PreviousVersionRegistryPath              = $FixedStrings[0]
+    PreviousVersionRegistryValue             = $FixedStrings[1]
+    PreviousVersionMinimum                   = $FixedStrings[2]
+    ApplicationVersion                       = $FixedStrings[3]
+    FileVersion                              = $FixedStrings[4]
+    InstallIcon                              = $InstallIcon
+    LanguageDialogTitle                      = $LanguageDialogTitle
+    LanguageDialogText                       = $LanguageDialogText
+    DefaultLanguage                          = $DefaultLanguage
+    UninstallerName                          = $UninstallerName
+    UninstallerCommand                       = $UninstallerCommand
+    RegistryWrites                           = @($RegistryWrites)
+    Shortcuts                                = @($Shortcuts)
+    IniOperations                            = @($IniOperations)
+    TextOperations                           = @($TextOperations)
+    FileOperations                           = @($FileOperations)
+    Variables                                = @($Variables)
+    InteractiveOperations                    = @($InteractiveOperations)
+    PostInteractiveRecords                   = @($PostInteractiveRecords)
+    Requirements                             = $Requirements
+    UserInformationFlags                     = $Options.UserInformationFlags
+    SilentInstallationDefault                = $Options.SilentInstallationDefault
+    NoUninstallation                         = $Options.NoUninstallation
+    X64ComplianceMode                        = $Options.X64ComplianceMode
+    RequireAdmin                             = $Options.RequireAdmin
+    DirectLicenseApproval                    = $Options.DirectLicenseApproval
+    ProhibitSilentInstallation               = $Options.ProhibitSilentInstallation
+    OptionOffset                             = $OptionOffset
+    OptionBlockSize                          = $ProfileOptions.OptionBlockEvidence.Size
+    OptionBlockEvidence                      = $ProfileOptions.OptionBlockEvidence
+    DecodedBytes                             = $Bytes
   }
 }
 
@@ -1001,16 +1240,57 @@ function Read-AstrumFileCatalog {
     $Prefix = $DataLength -ge 2 ? (Read-BinaryBytes -Stream $Stream -Offset $DataOffset -Count 2) : [byte[]]::new(0)
     $Compression = $Prefix.Length -eq 2 -and (Test-BinarySequence $Prefix $Script:AstrumGZipMagic) ? 'GZip' : 'Stored'
     $ExpectedSize = if ($Compression -eq 'GZip' -and $DataLength -ge 18) { [long](Read-BinaryInteger -Stream $Stream -Offset ($DataOffset + $DataLength - 4) -Size 4) } else { $DataLength }
+    # Version-capable descriptors store VS_FIXEDFILEINFO version halves followed by the packed
+    # code-page/language translation. A 0xFFFFFFFF version pair marks a record without this data.
+    $HasVersionResource = $Values[8] -ne [uint32]::MaxValue -and $Values[9] -ne [uint32]::MaxValue
+    $VersionResourceEvidence = if ($HasVersionResource) {
+      [pscustomobject][ordered]@{
+        FileVersion     = '{0}.{1}.{2}.{3}' -f ($Values[8] -shr 16), ($Values[8] -band 0xFFFF), ($Values[9] -shr 16), ($Values[9] -band 0xFFFF)
+        FileMajorPart   = [int]($Values[8] -shr 16)
+        FileMinorPart   = [int]($Values[8] -band 0xFFFF)
+        FileBuildPart   = [int]($Values[9] -shr 16)
+        FilePrivatePart = [int]($Values[9] -band 0xFFFF)
+        LanguageId      = [int]($Values[10] -band 0xFFFF)
+        CodePage        = [int]($Values[10] -shr 16)
+        RawTranslation  = $Values[10]
+      }
+    } else { $null }
     $Files.Add([pscustomobject][ordered]@{
         Index = $Index; InstallationItemIndex = [int]$Values[0]; RecordOffset = $Offset; Path = $Path; NameOffset = $NameOffset
         DataOffset = $DataOffset; CompressedSize = $DataLength; ExpectedSize = $ExpectedSize; Compression = $Compression
-        Flags = $Values[2]; Attributes = $Values[3]; ObservedChecksum = $Values[10]; ConditionKind = $ConditionKind
+        Flags = $Values[2]; Attributes = $Values[3]; OverwriteModeCode = [int](($Values[2] -shr 12) -band 0xF)
+        RegistrationPriority = [int]$Values[14]; VersionResourceEvidence = $VersionResourceEvidence
+        ObservedDescriptorWord10 = $HasVersionResource ? $null : $Values[10]; ConditionKind = $ConditionKind
         VolumeOffsets = @($VolumeOffsets); IsConditional = $ConditionWordIndex -ge 0 -and $ConditionKind -ne 0
+        IsResourceFile = $Path.StartsWith('<ResourceDir>\', [StringComparison]::OrdinalIgnoreCase)
       })
     $Offset = $DataOffset + $DataLength
   }
   if ($Offset -ne $Footer.Offset) { throw 'The Astrum file records do not consume the declared catalog and payload range.' }
   return @($Files)
+}
+
+function Test-AstrumLiteralVariable {
+  <#
+  .SYNOPSIS
+    Test whether a compiled custom variable resolves from its literal default value.
+  .DESCRIPTION
+    A Nowhere variable resolves from its default value. The parser also accepts the observed
+    Registry/HKEY_CLASSES_ROOT record with empty key and value locations: the Astrum runtime falls
+    back to its default value, as proven by live installation of the BreakAlube package. Other
+    Registry, INI, and file-search sources read runtime state and stay unresolved.
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory)][string]$Name,
+    [Parameter(Mandatory)]$Variable,
+    [AllowEmptyCollection()][string[]]$ReservedNames = @()
+  )
+  if ($Name -notmatch '^<[^<>]+>$' -or $Name -in $ReservedNames) { return $false }
+  $LocationsAreEmpty = [string]::IsNullOrEmpty([string]$Variable.Location2) -and [string]::IsNullOrEmpty([string]$Variable.Location3)
+  $UsesLiteralSource = [uint32]$Variable.SourceCode -eq [uint32]::MaxValue -and [string]::IsNullOrEmpty([string]$Variable.Location1) -and $LocationsAreEmpty
+  $UsesObservedEmptyRegistrySource = [uint32]$Variable.SourceCode -eq 0 -and [int64]$Variable.Location1 -eq -2147483648 -and $LocationsAreEmpty
+  return ($UsesLiteralSource -or $UsesObservedEmptyRegistrySource) -and -not [string]::IsNullOrEmpty([string]$Variable.DefaultValue)
 }
 
 function Resolve-AstrumVariables {
@@ -1023,15 +1303,28 @@ function Resolve-AstrumVariables {
     Parsed fixed configuration values.
   .PARAMETER InstallLocation
     Manifest-safe default installation path.
+  .PARAMETER RegistryView
+    Registry and known-folder view used by the installer runtime. A 32-bit view maps the
+    Program Files variables to their x86 variants on 64-bit Windows.
+  .PARAMETER MaximumDepth
+    Maximum replacement passes used to resolve nested deterministic variables and stop cycles.
   #>
   [OutputType([string])]
-  param ([AllowNull()][string]$Value, [Parameter(Mandatory)]$Configuration, [AllowNull()][string]$InstallLocation)
+  param (
+    [AllowNull()][string]$Value,
+    [Parameter(Mandatory)]$Configuration,
+    [AllowNull()][string]$InstallLocation,
+    [ValidateSet('32-bit', '64-bit', 'default')][string]$RegistryView = 'default',
+    [ValidateRange(1, 64)][int]$MaximumDepth = 16
+  )
   if ($null -eq $Value) { return $null }
   $FileNameSafeApplicationName = [regex]::Replace([string]$Configuration.ApplicationName, '[<>:"/\\|?*]', '_')
+  $ProgramFiles = $RegistryView -eq '32-bit' ? '%ProgramFiles(x86)%' : '%ProgramFiles%'
+  $CommonProgramFiles = $RegistryView -eq '32-bit' ? '%CommonProgramFiles(x86)%' : '%CommonProgramFiles%'
   $Map = [ordered]@{
     '<AppName>' = $Configuration.ApplicationName; '<AppVersion>' = $Configuration.ApplicationVersion; '<CompanyName>' = $Configuration.CompanyName
     '<AppNameInFileNameFormat>' = $FileNameSafeApplicationName; '<__AppName__>' = $FileNameSafeApplicationName; '<Organization>' = $Configuration.CompanyName
-    '<InstallDir>' = $InstallLocation; '<ProgramFiles>' = '%ProgramFiles%'; '<CommonFiles>' = '%CommonProgramFiles%'
+    '<InstallDir>' = $InstallLocation; '<ProgramFiles>' = $ProgramFiles; '<CommonFiles>' = $CommonProgramFiles
     '<WindowsDir>' = '%WINDIR%'; '<SystemDir>' = '%WINDIR%\System32'; '<TempDir>' = '%TEMP%'; '<FontDir>' = '%WINDIR%\Fonts'
     '<StartMenu>' = '%APPDATA%\Microsoft\Windows\Start Menu'; '<StartMenuNt>' = '%ProgramData%\Microsoft\Windows\Start Menu'
     '<ProgramsDir>' = '%APPDATA%\Microsoft\Windows\Start Menu\Programs'; '<ProgramsDirNt>' = '%ProgramData%\Microsoft\Windows\Start Menu\Programs'
@@ -1040,8 +1333,21 @@ function Resolve-AstrumVariables {
     '<RoamingAppData>' = '%APPDATA%'; '<LocalAppData>' = '%LOCALAPPDATA%'; '<CommonAppData>' = '%ProgramData%'; '<SystemDrive>' = '%SystemDrive%'
     '<UninstallerName>' = $Configuration.UninstallerName
   }
+  # Builder help defines a custom variable whose source is "Nowhere" as its literal default value.
+  # Compiled records with any source arguments may read registry, INI, files, dialogs, or DLL state
+  # at runtime and therefore remain unresolved. Built-ins retain precedence over custom names.
+  foreach ($Variable in @($Configuration.Variables)) {
+    if (-not (Test-AstrumLiteralVariable -Name ([string]$Variable.Name) -Variable $Variable -ReservedNames @($Map.Keys))) { continue }
+    $Map[[string]$Variable.Name] = [string]$Variable.DefaultValue
+  }
   $Result = $Value
-  foreach ($Pair in $Map.GetEnumerator()) { if ($null -ne $Pair.Value) { $Result = $Result.Replace($Pair.Key, [string]$Pair.Value, [StringComparison]::OrdinalIgnoreCase) } }
+  for ($Depth = 0; $Depth -lt $MaximumDepth; $Depth++) {
+    $Previous = $Result
+    # A null string parameter is coerced to an empty string by PowerShell. Treat empty variable
+    # values as unresolved so a missing install path cannot silently become a root-relative path.
+    foreach ($Pair in $Map.GetEnumerator()) { if (-not [string]::IsNullOrEmpty([string]$Pair.Value)) { $Result = $Result.Replace($Pair.Key, [string]$Pair.Value, [StringComparison]::OrdinalIgnoreCase) } }
+    if ($Result -ceq $Previous) { break }
+  }
   return $Result
 }
 
@@ -1053,12 +1359,26 @@ function ConvertTo-AstrumManifestPath {
     Compiled default installation path.
   .PARAMETER Configuration
     Parsed package-name and publisher evidence.
+  .PARAMETER RegistryView
+    Registry and known-folder view used by the installer runtime.
   #>
   [OutputType([string])]
-  param ([AllowNull()][string]$Value, [Parameter(Mandatory)]$Configuration)
+  param (
+    [AllowNull()][string]$Value,
+    [Parameter(Mandatory)]$Configuration,
+    [ValidateSet('32-bit', '64-bit', 'default')][string]$RegistryView = 'default'
+  )
   if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
-  $Result = $Value.Replace('<ProgramFiles>', '%ProgramFiles%', [StringComparison]::OrdinalIgnoreCase).Replace('<CommonFiles>', '%CommonProgramFiles%', [StringComparison]::OrdinalIgnoreCase)
+  $ProgramFiles = $RegistryView -eq '32-bit' ? '%ProgramFiles(x86)%' : '%ProgramFiles%'
+  $CommonProgramFiles = $RegistryView -eq '32-bit' ? '%CommonProgramFiles(x86)%' : '%CommonProgramFiles%'
+  $Result = $Value.Replace('<ProgramFiles>', $ProgramFiles, [StringComparison]::OrdinalIgnoreCase).Replace('<CommonFiles>', $CommonProgramFiles, [StringComparison]::OrdinalIgnoreCase)
   $Result = $Result.Replace('<AppName>', [string]$Configuration.ApplicationName, [StringComparison]::OrdinalIgnoreCase).Replace('<CompanyName>', [string]$Configuration.CompanyName, [StringComparison]::OrdinalIgnoreCase)
+  # Deterministic custom variables (literal "Nowhere" source) also resolve here; the live BreakAlube
+  # package proves install paths compose them. Non-literal sources still leave the marker in place.
+  foreach ($Variable in @($Configuration.Variables)) {
+    if (-not (Test-AstrumLiteralVariable -Name ([string]$Variable.Name) -Variable $Variable -ReservedNames @('<ProgramFiles>', '<CommonFiles>', '<AppName>', '<CompanyName>'))) { continue }
+    $Result = $Result.Replace([string]$Variable.Name, [string]$Variable.DefaultValue, [StringComparison]::OrdinalIgnoreCase)
+  }
   return $Result.Contains('<', [StringComparison]::Ordinal) ? $null : $Result
 }
 
@@ -1078,8 +1398,8 @@ function ConvertTo-AstrumRegistryWrites {
   $HiveMap = @{ HKCR = 'HKEY_CLASSES_ROOT'; HKCU = 'HKEY_CURRENT_USER'; HKLM = 'HKEY_LOCAL_MACHINE'; HKU = 'HKEY_USERS' }
   $TypeMap = @{ 0 = 'REG_BINARY'; 1 = 'REG_DWORD'; 2 = 'REG_SZ'; 3 = 'REG_MULTI_SZ'; 4 = 'REG_EXPAND_SZ' }
   foreach ($Write in $Configuration.RegistryWrites) {
-    $Key = Resolve-AstrumVariables -Value $Write.Key -Configuration $Configuration -InstallLocation $InstallLocation
-    $Value = Resolve-AstrumVariables -Value ([string]$Write.Value) -Configuration $Configuration -InstallLocation $InstallLocation
+    $Key = Resolve-AstrumVariables -Value $Write.Key -Configuration $Configuration -InstallLocation $InstallLocation -RegistryView $RegistryView
+    $Value = Resolve-AstrumVariables -Value ([string]$Write.Value) -Configuration $Configuration -InstallLocation $InstallLocation -RegistryView $RegistryView
     [pscustomobject][ordered]@{
       Hive = $HiveMap[$Write.Root]; Root = $Write.Root; View = $RegistryView; Key = $Key; Name = $Write.Name; Value = $Value
       Type = $TypeMap[[int]$Write.TypeCode] ?? "Observed($($Write.TypeCode))"; Condition = $Write.Condition
@@ -1101,6 +1421,15 @@ function Get-AstrumArpEntries {
   foreach ($Group in $Groups) {
     $Values = [ordered]@{}
     foreach ($Write in $Group.Group) { $Values[[string]$Write.Name] = $Write.Value }
+    # Astrum writes the generated uninstall executable as a quoted command even when the compiled
+    # registry template contains only the unquoted path. Preserve existing arguments verbatim.
+    if ($Values.Contains('UninstallString') -and -not [string]::IsNullOrWhiteSpace([string]$Values.UninstallString)) {
+      $UninstallCommand = [string]$Values.UninstallString
+      if (-not $UninstallCommand.StartsWith('"', [StringComparison]::Ordinal)) {
+        $ExecutableMatch = [regex]::Match($UninstallCommand, '^(?<Executable>.*?\.exe)(?<Arguments>\s+.*)?$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if ($ExecutableMatch.Success) { $Values.UninstallString = '"{0}"{1}' -f $ExecutableMatch.Groups['Executable'].Value, $ExecutableMatch.Groups['Arguments'].Value }
+      }
+    }
     $SystemComponent = $Values.Contains('SystemComponent') ? [int]$Values.SystemComponent : 0
     $Root = $Group.Group[0].Root
     [pscustomobject][ordered]@{
@@ -1149,6 +1478,45 @@ function Test-AstrumCompiledDialog {
   return @(Find-BinaryPattern -Stream $Context.Stream -Pattern $Marker -StartOffset $StartOffset -Length ($EndOffset - $StartOffset) -Maximum 1).Count -gt 0
 }
 
+function Get-AstrumRuntimeCommandLineEvidence {
+  <#
+  .SYNOPSIS
+    Locate exact command-line tokens compiled into the native Astrum runtime image.
+  .PARAMETER Stream
+    Caller-owned seekable installer stream. Searches are bounded to the PE image before its overlay.
+  .OUTPUTS
+    Runtime switch names and absolute string offsets; no application payload bytes are searched.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][IO.Stream]$Stream)
+
+  $RuntimeEnd = Get-PEOverlayOffset -Stream $Stream
+  $Switches = [Collections.Generic.List[string]]::new()
+  $Offsets = [ordered]@{}
+  foreach ($CommandLineSwitch in '/SILENT', '/ACCEPTLICENSE') {
+    $Pattern = [Text.Encoding]::ASCII.GetBytes($CommandLineSwitch)
+    $PatternOffsets = @(Find-BinaryPattern -Stream $Stream -Pattern $Pattern -StartOffset 0 -Length $RuntimeEnd -Maximum 16)
+    foreach ($Offset in $PatternOffsets) {
+      $Before = $Offset -gt 0 ? (Read-BinaryBytes -Stream $Stream -Offset ($Offset - 1) -Count 1)[0] : 0
+      $AfterOffset = $Offset + $Pattern.Length
+      $After = $AfterOffset -lt $RuntimeEnd ? (Read-BinaryBytes -Stream $Stream -Offset $AfterOffset -Count 1)[0] : 0
+      # Runtime option tables delimit tokens with NUL or ASCII whitespace. This excludes a matching
+      # substring embedded in an unrelated identifier while allowing the observed "/SILENT /NOREMOVE" table.
+      if ($Before -notin 0, 9, 10, 13, 32, 34 -or $After -notin 0, 9, 10, 13, 32, 34) { continue }
+      $Normalized = $CommandLineSwitch.ToLowerInvariant()
+      if (-not $Switches.Contains($Normalized)) { $Switches.Add($Normalized) }
+      $Offsets[$Normalized] = [long]$Offset
+      break
+    }
+  }
+  return [pscustomobject]@{
+    RuntimeEndOffset = $RuntimeEnd
+    Switches         = $Switches.ToArray()
+    Offsets          = [pscustomobject]$Offsets
+    SupportsSilent   = $Switches.Contains('/silent')
+  }
+}
+
 function ConvertTo-AstrumAppsAndFeaturesEntry {
   <#
   .SYNOPSIS
@@ -1159,11 +1527,13 @@ function ConvertTo-AstrumAppsAndFeaturesEntry {
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)]$Entry)
 
-  $Result = [ordered]@{ ProductCode = $Entry.ProductCode }
+  $Result = [ordered]@{}
+  if (Test-AstrumResolvedValue -Value $Entry.ProductCode) { $Result.ProductCode = $Entry.ProductCode }
   foreach ($Name in 'DisplayName', 'DisplayVersion', 'Publisher') {
     $Value = $Entry.$Name
     if (-not [string]::IsNullOrWhiteSpace([string]$Value) -and (Test-AstrumResolvedValue -Value $Value)) { $Result[$Name] = $Value }
   }
+  if ($Result.Count -eq 0) { return $null }
   return [pscustomobject]$Result
 }
 
@@ -1532,10 +1902,11 @@ function Get-AstrumInstallWizardInfo {
       $Configuration = $Context.Configuration
       $ExecutionLevel = Get-PERequestedExecutionLevel -Path $ResolvedContainer.AnalysisPath
       $OuterArchitecture = Get-PEArchitectureInfo -Path $ResolvedContainer.AnalysisPath
+      $RuntimeCommandLineEvidence = Get-AstrumRuntimeCommandLineEvidence -Stream $Context.Stream
       # Astrum's x64-compliance option deliberately selects the native 64-bit registry view even
       # though the 2.29 setup runtime itself remains a 32-bit PE.
       $RegistryView = if ($Configuration.X64ComplianceMode) { '64-bit' } elseif ($OuterArchitecture.NativeArchitecture -eq 'x86') { '32-bit' } elseif ($OuterArchitecture.NativeArchitecture -in 'x64', 'arm64') { '64-bit' } else { 'default' }
-      $InstallLocation = ConvertTo-AstrumManifestPath -Value $Configuration.InstallPath -Configuration $Configuration
+      $InstallLocation = ConvertTo-AstrumManifestPath -Value $Configuration.InstallPath -Configuration $Configuration -RegistryView $RegistryView
       $RegistryWrites = @(ConvertTo-AstrumRegistryWrites -Configuration $Configuration -InstallLocation $InstallLocation -RegistryView $RegistryView)
       $ArpEntries = @(Get-AstrumArpEntries -RegistryWrites $RegistryWrites)
       $VisibleArp = @($ArpEntries | Where-Object IsVisible)
@@ -1548,6 +1919,9 @@ function Get-AstrumInstallWizardInfo {
       if ($VisibleArp.Count -gt 1) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'Astrum.Arp.Ambiguous' -Source 'Astrum InstallWizard' -Message 'The compiled installer contains more than one visible unconditional Apps & Features registration.' -Kind Ambiguous -Areas Metadata -AffectedFields ProductCode, AppsAndFeaturesEntries -Evidence $VisibleArp)) }
       if ($ArpScopes.Count -gt 1) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'Astrum.Scope.Ambiguous' -Source 'Astrum InstallWizard' -Message 'The compiled installer contains unconditional uninstall registry entries in both user and machine hives.' -Kind Ambiguous -Areas Metadata, Installability -AffectedFields Scope -Evidence $ArpEntries)) }
       foreach ($Entry in $VisibleArp) {
+        if (-not (Test-AstrumResolvedValue -Value $Entry.ProductCode)) {
+          $Diagnostics.Add((New-InstallerDiagnostic -Id 'Astrum.Arp.Unresolved.ProductCode' -Source 'Astrum InstallWizard' -Message 'The compiled Apps & Features key contains an unresolved Astrum variable and was retained only as raw ARP evidence.' -Kind Incomplete -Areas Metadata -AffectedFields ProductCode, AppsAndFeaturesEntries -Evidence ([ordered]@{ ProductCode = $Entry.ProductCode })))
+        }
         foreach ($Field in 'DisplayName', 'DisplayVersion', 'Publisher', 'InstallLocation', 'UninstallString', 'QuietUninstallString', 'DisplayIcon') {
           $Value = $Entry.$Field
           if (-not [string]::IsNullOrWhiteSpace([string]$Value) -and -not (Test-AstrumResolvedValue -Value $Value)) {
@@ -1556,14 +1930,32 @@ function Get-AstrumInstallWizardInfo {
           }
         }
       }
-      if ($Configuration.RemainingBytes -gt 0) {
-        $TailMessage = $Configuration.OptionRoute -eq 'SparseModern2' ? "The source-backed records and known modern 2.x fixed-option offsets were parsed; $($Configuration.RemainingBytes) bytes in the sparse option block still contain fields with unassigned semantics." : "The source-backed $($Configuration.ConfigurationProfile) records were parsed; the remaining $($Configuration.RemainingBytes)-byte legacy option block is retained as bounded evidence because its sparse fields have not been assigned modern 2.x semantics."
-        $Diagnostics.Add((New-InstallerDiagnostic -Id 'Astrum.Configuration.PartialTail' -Source 'Astrum InstallWizard' -Message $TailMessage -Kind Incomplete -Areas Metadata))
-      }
       if ($Context.Files | Where-Object IsConditional) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'Astrum.Payload.Conditional' -Source 'Astrum InstallWizard' -Message 'Some payload files are conditional; extraction returns their physical content but installed-state selection requires condition or VM evidence.' -Kind ManualValidation -Areas Extraction, Installability -AffectedFields InstallationMetadata)) }
-      $ExecutedPayloads = @($Configuration.InteractiveOperations | Where-Object ActionCode -EQ 0)
+      # Both execute variants launch an external program. The wait variant differs only in whether
+      # Astrum blocks until the child exits, so it requires the same nested-payload analysis.
+      $ExecutedPayloads = @($Configuration.InteractiveOperations | Where-Object { $_.ActionCode -in 0, 6 })
       if ($ExecutedPayloads.Count) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'Astrum.Execution.NestedPayload' -Source 'Astrum InstallWizard' -Message 'The compiled configuration executes one or more nested programs; their side effects require separate analysis.' -Kind ManualValidation -Areas Installability, Security -AffectedFields InstallerSwitches -Evidence $ExecutedPayloads)) }
-      if ($Configuration.ResourceOperations.Count) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'Astrum.Resource.SemanticsIncomplete' -Source 'Astrum InstallWizard' -Message 'The compiled configuration contains advanced resource records whose field semantics remain only partly assigned.' -Kind Incomplete -Areas Extraction, Installability -Evidence $Configuration.ResourceOperations)) }
+      $UnknownOperationEvidence = [Collections.Generic.List[object]]::new()
+      foreach ($Record in $Configuration.TextOperations) { if ([string]::IsNullOrWhiteSpace([string]$Record.OperationName)) { $UnknownOperationEvidence.Add([pscustomobject]@{ Table = 'Text'; Code = $Record.Operation }) } }
+      foreach ($Record in $Configuration.FileOperations) {
+        if ([string]::IsNullOrWhiteSpace([string]$Record.ActionName)) { $UnknownOperationEvidence.Add([pscustomobject]@{ Table = 'File'; Code = $Record.ActionCode }) }
+        if ([string]::IsNullOrWhiteSpace([string]$Record.TimingName)) { $UnknownOperationEvidence.Add([pscustomobject]@{ Table = 'FileTiming'; Code = $Record.Timing }) }
+      }
+      foreach ($Record in $Configuration.InteractiveOperations) {
+        if ([string]::IsNullOrWhiteSpace([string]$Record.ActionName)) { $UnknownOperationEvidence.Add([pscustomobject]@{ Table = 'Interactive'; Code = $Record.ActionCode }) }
+        if ([string]::IsNullOrWhiteSpace([string]$Record.TimingName)) { $UnknownOperationEvidence.Add([pscustomobject]@{ Table = 'InteractiveTiming'; Code = $Record.Timing }) }
+      }
+      if ($UnknownOperationEvidence.Count) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'Astrum.Operation.UnknownCode' -Source 'Astrum InstallWizard' -Message 'The compiled configuration contains operation or timing values outside the source-backed Astrum enum tables.' -Kind Unsupported -Areas Metadata, Installability -Evidence @($UnknownOperationEvidence))) }
+      $UnknownVariableEvidence = [Collections.Generic.List[object]]::new()
+      $KnownVariableFlags = [uint32]$Script:AstrumVariableSemantics.Flags.StoreDriveOnly -bor [uint32]$Script:AstrumVariableSemantics.Flags.SetTrueIfExists -bor [uint32]$Script:AstrumVariableSemantics.Flags.UserVisible
+      foreach ($Variable in $Configuration.Variables) {
+        if ([string]::IsNullOrWhiteSpace([string]$Variable.TypeName)) { $UnknownVariableEvidence.Add([pscustomobject]@{ Variable = $Variable.Name; Field = 'TypeCode'; Value = $Variable.TypeCode }) }
+        if ([string]::IsNullOrWhiteSpace([string]$Variable.SourceName)) { $UnknownVariableEvidence.Add([pscustomobject]@{ Variable = $Variable.Name; Field = 'SourceCode'; Value = $Variable.SourceCode }) }
+        $UnknownFlags = [uint32]$Variable.Flags -band (-bnot $KnownVariableFlags)
+        if ($UnknownFlags -ne 0) { $UnknownVariableEvidence.Add([pscustomobject]@{ Variable = $Variable.Name; Field = 'Flags'; Value = $Variable.Flags; UnknownBits = $UnknownFlags }) }
+      }
+      if ($UnknownVariableEvidence.Count) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'Astrum.Variable.UnknownCode' -Source 'Astrum InstallWizard' -Message 'The compiled configuration contains custom-variable values outside the source-backed Astrum type, source, or option tables.' -Kind Unsupported -Areas Metadata, Installability -Evidence @($UnknownVariableEvidence))) }
+      if ($Configuration.PostInteractiveRecords.Count) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'Astrum.PostInteractive.SemanticsIncomplete' -Source 'Astrum InstallWizard' -Message 'The compiled configuration contains additional 2.x post-interactive records whose field semantics remain only partly assigned.' -Kind Incomplete -Areas Metadata, Installability -Evidence $Configuration.PostInteractiveRecords)) }
       $Scope = $ArpScopes.Count -eq 1 ? $ArpScopes[0] : $null
       if (-not $Scope) {
         if ($ExecutionLevel -eq 'requireAdministrator') { $Scope = 'machine' }
@@ -1610,15 +2002,19 @@ function Get-AstrumInstallWizardInfo {
       $DisplayVersion = $PrimaryArp -and (Test-AstrumResolvedValue -Value $PrimaryArp.DisplayVersion) ? $PrimaryArp.DisplayVersion : $Configuration.ApplicationVersion
       $Publisher = $PrimaryArp -and (Test-AstrumResolvedValue -Value $PrimaryArp.Publisher) ? $PrimaryArp.Publisher : $Configuration.CompanyName
       if (-not $DisplayVersion) { $UnresolvedFields.Add('DisplayVersion') }
-      $ProductCode = $PrimaryArp ? $PrimaryArp.ProductCode : $null
+      # Keep dynamic uninstall-key templates in ArpEntries, but never expose them as matching
+      # evidence. A guessed ProductCode can bind WinGet to an unrelated installed package.
+      $ProductCode = $PrimaryArp -and (Test-AstrumResolvedValue -Value $PrimaryArp.ProductCode) ? $PrimaryArp.ProductCode : $null
       if (-not $ProductCode) { $UnresolvedFields.Add('ProductCode') }
       $WritesArp = $VisibleArp.Count -gt 0
       $AppsAndFeaturesEntries = @($VisibleArp | ForEach-Object { ConvertTo-AstrumAppsAndFeaturesEntry -Entry $_ })
       $LicenseDialogSelected = Test-AstrumCompiledDialog -Context $Context -Marker $Script:AstrumLicenseDialogMarker
-      $UserInformationBlocksSilent = Test-AstrumCompiledDialog -Context $Context -Marker $Script:AstrumUserInformationDialogMarker
+      # The compiled User Information dialog only blocks /silent for generations whose profile keeps
+      # the documented claim; VM installations of Modern2 media prove the 2.29.50 runtime skips it.
+      $UserInformationBlocksSilent = (Test-AstrumCompiledDialog -Context $Context -Marker $Script:AstrumUserInformationDialogMarker) -and $Configuration.UserInformationBlocksSilent
       $LicenseRequired = $LicenseDialogSelected -and $Configuration.ProhibitSilentInstallation
       $SupportsSilentInstallation = switch ($Configuration.SilentRoute) {
-        'BuilderVersionEvidenceRequired' { $null }
+        'RuntimeSwitchEvidence' { $RuntimeCommandLineEvidence.SupportsSilent ? (-not $UserInformationBlocksSilent) : $null }
         'Documented2' { -not $UserInformationBlocksSilent }
         default { throw "Astrum configuration profile '$($Configuration.ConfigurationProfile)' uses an unsupported silent-installation route '$($Configuration.SilentRoute)'." }
       }
@@ -1629,82 +2025,89 @@ function Get-AstrumInstallWizardInfo {
         if ($LicenseRequired) { $InstallerSwitches['Custom'] = '/AcceptLicense' }
         $InstallModes = @('interactive', 'silent')
       }
-      if ($UserInformationBlocksSilent) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'Astrum.Silent.UserInformationDialog' -Source 'Astrum InstallWizard' -Message 'The compiled installer includes the standard User Information dialog. Astrum documents that this dialog makes /silent fail, so this artifact is interactive-only.' -Kind Unsupported -Areas Installability -AffectedFields InstallerSwitches, InstallModes)) }
+      if ($UserInformationBlocksSilent) {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'Astrum.Silent.UserInformationDialog' -Source 'Astrum InstallWizard' -Message 'The compiled installer includes the standard User Information dialog. Astrum documents that this dialog makes /silent fail, so this artifact is interactive-only.' -Kind Unsupported -Areas Installability -AffectedFields InstallerSwitches, InstallModes -Evidence $Configuration.UserInformationEvidence))
+      } elseif (Test-AstrumCompiledDialog -Context $Context -Marker $Script:AstrumUserInformationDialogMarker) {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'Astrum.Silent.UserInformationDialogIgnored' -Source 'Astrum InstallWizard' -Message 'The compiled installer includes the standard User Information dialog, but this generation''s runtime skips it under /silent; VM installation evidence shows unattended installation succeeds.' -Kind Information -Areas Installability -Evidence $Configuration.UserInformationEvidence))
+      }
       if ($LicenseRequired) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'Astrum.Silent.LicenseAcceptance' -Source 'Astrum InstallWizard' -Message 'The selected license dialog prohibits unattended installation unless /AcceptLicense is supplied.' -Kind Information -Areas Installability -AffectedFields InstallerSwitches)) }
-      if ($null -eq $SupportsSilentInstallation) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'Astrum.Silent.LegacyRuntimeVersionRequired' -Source 'Astrum InstallWizard' -Message 'Astrum 1.x media predates structured runtime-version evidence. Silent installation was introduced during the 1.x line, so /silent support must be established from builder-version or VM evidence before authoring it.' -Kind ManualValidation -Areas Installability -AffectedFields InstallerSwitches, InstallModes)) }
+      if ($null -eq $SupportsSilentInstallation) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'Astrum.Silent.LegacyRuntimeVersionRequired' -Source 'Astrum InstallWizard' -Message 'This Astrum 1.x runtime does not expose a validated /SILENT token in its bounded native option table. Establish the builder subversion or validate unattended behavior in a VM before authoring it.' -Kind ManualValidation -Areas Installability -AffectedFields InstallerSwitches, InstallModes)) }
       if ($Configuration.NoUninstallation) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'Astrum.Uninstall.Disabled' -Source 'Astrum InstallWizard' -Message 'The compiled configuration disables generated uninstallation. Explicit ARP registry records are retained as evidence, but their uninstall command may be unusable unless custom logic supplies it.' -Kind Risk -Areas Metadata, Installability -AffectedFields ProductCode, AppsAndFeaturesEntries)) }
 
       [pscustomobject][ordered]@{
-        Path                         = $File.FullName
-        InstallerType                = 'exe'
-        Family                       = 'Astrum InstallWizard'
-        ProductCode                  = $ProductCode
-        UpgradeCode                  = $null
-        DisplayName                  = $DisplayName
-        DisplayVersion               = $DisplayVersion
-        Publisher                    = $Publisher
-        Scope                        = $Scope
-        DefaultInstallLocation       = $PrimaryArp -and $PrimaryArp.InstallLocation ? $PrimaryArp.InstallLocation : $InstallLocation
-        WritesAppsAndFeaturesEntry   = $WritesArp
-        AppsAndFeaturesProductCode   = $ProductCode
-        AppsAndFeaturesInstallerType = $null
-        AppsAndFeaturesEntries       = $AppsAndFeaturesEntries
-        CanExpand                    = $true
-        ExtractedFiles               = @($Context.Files.Path)
-        FormatCatalogId              = [string]$Context.Trailer.FormatId
-        FormatGeneration             = $Context.Trailer.FormatGeneration
-        ConfigurationProfile         = $Configuration.ConfigurationProfile
-        ContainerRoute               = $ResolvedContainer.ContainerRoute
-        TinyWrapper                  = $ResolvedContainer.TinyWrapper
-        CompanionFiles               = @($ResolvedCompanions.FullName)
-        RequestedExecutionLevel      = $ExecutionLevel
-        ElevationRequirement         = ($ExecutionLevel -eq 'requireAdministrator' -or $Configuration.RequireAdmin) ? 'elevationRequired' : $null
-        SupportedScopes              = $SupportedScopes
-        RegistryView                 = $RegistryView
-        RegistryWrites               = $RegistryWrites
-        ArpEntries                   = $ArpEntries
-        UninstallString              = $PrimaryArp ? $PrimaryArp.UninstallString : $null
-        QuietUninstallString         = $PrimaryArp ? $PrimaryArp.QuietUninstallString : $null
-        DisplayIcon                  = $PrimaryArp ? $PrimaryArp.DisplayIcon : $null
-        Protocols                    = @($AssociationInfo.Protocols)
-        FileExtensions               = @($AssociationInfo.FileExtensions)
-        ProtocolAssociations         = @($AssociationInfo.ProtocolAssociations)
-        FileExtensionAssociations    = @($AssociationInfo.FileExtensionAssociations)
-        RegistryAssociationInfo      = $AssociationInfo
-        Shortcuts                    = @($Configuration.Shortcuts)
-        IniOperations                = @($Configuration.IniOperations)
-        TextOperations               = @($Configuration.TextOperations)
-        FileOperations               = @($Configuration.FileOperations)
-        InteractiveOperations        = @($Configuration.InteractiveOperations)
-        ResourceOperations           = @($Configuration.ResourceOperations)
-        ExecutedPayloads             = $ExecutedPayloads
-        Variables                    = @($Configuration.Variables)
-        Requirements                 = $Configuration.Requirements
-        Conditions                   = @($RegistryWrites.Condition | Where-Object { $_ }) + @($Context.Files | Where-Object IsConditional)
-        InstallationItems            = @($Context.InstallationItems)
-        PayloadCatalog               = @($Context.Files)
-        CompressionEvidence          = @($Context.Files | Group-Object Compression | ForEach-Object { [pscustomobject]@{ Algorithm = $_.Name; Count = $_.Count } })
-        OuterArchitectureInfo        = $OuterArchitecture
-        PayloadArchitectureInfo      = $PayloadArchitectureInfo
-        PayloadArchitectures         = $PayloadArchitectures
-        DependencyInfo               = $PayloadDependencyInfo
-        InstallerSwitches            = $InstallerSwitches
-        InstallModes                 = $InstallModes
-        InstallerSuccessCodes        = @($Context.Trailer.Profile.InstallerSuccessCodes)
-        SupportsSilentInstallation   = $SupportsSilentInstallation
-        LicenseDialogSelected        = $LicenseDialogSelected
-        LicenseAcceptanceRequired    = $LicenseRequired
-        UserInformationBlocksSilent  = $UserInformationBlocksSilent
-        SilentInstallationDefault    = $Configuration.SilentInstallationDefault
-        NoUninstallation             = $Configuration.NoUninstallation
-        X64ComplianceMode            = $Configuration.X64ComplianceMode
-        RequireAdmin                 = $Configuration.RequireAdmin
-        Trailer                      = $Context.Trailer
-        Footer                       = $Context.Footer
-        Configuration                = $Configuration
-        ParserVersionInfo            = [pscustomobject]@{ Parser = 'Astrum InstallWizard'; CatalogVersion = [int]$Script:AstrumFormatCatalog.CatalogVersion; FormatId = [string]$Context.Trailer.FormatId; FormatGeneration = $Context.Trailer.FormatGeneration; ConfigurationProfile = $Configuration.ConfigurationProfile; RuntimeFormat = $Configuration.RuntimeFormat; ContainerRoute = $ResolvedContainer.ContainerRoute; Evidence = @('validated catalog-selected trailer/footer', 'twice checksum-protected configuration', 'installation-item and file catalogs', 'compiled standard-dialog resources', 'catalog-selected configuration and file descriptors') }
-        Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic @($Diagnostics))
-        UnresolvedFields             = @($UnresolvedFields | Sort-Object -Unique)
+        Path                                     = $File.FullName
+        InstallerType                            = 'exe'
+        Family                                   = 'Astrum InstallWizard'
+        ProductCode                              = $ProductCode
+        UpgradeCode                              = $null
+        DisplayName                              = $DisplayName
+        DisplayVersion                           = $DisplayVersion
+        Publisher                                = $Publisher
+        Scope                                    = $Scope
+        DefaultInstallLocation                   = $PrimaryArp -and $PrimaryArp.InstallLocation ? $PrimaryArp.InstallLocation : $InstallLocation
+        WritesAppsAndFeaturesEntry               = $WritesArp
+        AppsAndFeaturesProductCode               = $ProductCode
+        AppsAndFeaturesInstallerType             = $null
+        AppsAndFeaturesEntries                   = $AppsAndFeaturesEntries
+        CanExpand                                = $true
+        ExtractedFiles                           = @($Context.Files.Path)
+        FormatCatalogId                          = [string]$Context.Trailer.FormatId
+        FormatGeneration                         = $Context.Trailer.FormatGeneration
+        ConfigurationProfile                     = $Configuration.ConfigurationProfile
+        ConfigurationProfileObservedVersionRange = $Configuration.ConfigurationProfileObservedVersionRange
+        ContainerRoute                           = $ResolvedContainer.ContainerRoute
+        TinyWrapper                              = $ResolvedContainer.TinyWrapper
+        CompanionFiles                           = @($ResolvedCompanions.FullName)
+        RequestedExecutionLevel                  = $ExecutionLevel
+        ElevationRequirement                     = ($ExecutionLevel -eq 'requireAdministrator' -or $Configuration.RequireAdmin) ? 'elevationRequired' : $null
+        SupportedScopes                          = $SupportedScopes
+        RegistryView                             = $RegistryView
+        RegistryWrites                           = $RegistryWrites
+        ArpEntries                               = $ArpEntries
+        UninstallString                          = $PrimaryArp -and (Test-AstrumResolvedValue -Value $PrimaryArp.UninstallString) ? $PrimaryArp.UninstallString : $null
+        QuietUninstallString                     = $PrimaryArp -and (Test-AstrumResolvedValue -Value $PrimaryArp.QuietUninstallString) ? $PrimaryArp.QuietUninstallString : $null
+        DisplayIcon                              = $PrimaryArp -and (Test-AstrumResolvedValue -Value $PrimaryArp.DisplayIcon) ? $PrimaryArp.DisplayIcon : $null
+        Protocols                                = @($AssociationInfo.Protocols)
+        FileExtensions                           = @($AssociationInfo.FileExtensions)
+        ProtocolAssociations                     = @($AssociationInfo.ProtocolAssociations)
+        FileExtensionAssociations                = @($AssociationInfo.FileExtensionAssociations)
+        RegistryAssociationInfo                  = $AssociationInfo
+        Shortcuts                                = @($Configuration.Shortcuts)
+        IniOperations                            = @($Configuration.IniOperations)
+        TextOperations                           = @($Configuration.TextOperations)
+        FileOperations                           = @($Configuration.FileOperations)
+        InteractiveOperations                    = @($Configuration.InteractiveOperations)
+        PostInteractiveRecords                   = @($Configuration.PostInteractiveRecords)
+        ExecutedPayloads                         = $ExecutedPayloads
+        Variables                                = @($Configuration.Variables)
+        Requirements                             = $Configuration.Requirements
+        Conditions                               = @($RegistryWrites.Condition | Where-Object { $_ }) + @($Context.Files | Where-Object IsConditional)
+        InstallationItems                        = @($Context.InstallationItems)
+        PayloadCatalog                           = @($Context.Files)
+        ResourceFiles                            = @($Context.Files | Where-Object IsResourceFile)
+        CompressionEvidence                      = @($Context.Files | Group-Object Compression | ForEach-Object { [pscustomobject]@{ Algorithm = $_.Name; Count = $_.Count } })
+        OuterArchitectureInfo                    = $OuterArchitecture
+        PayloadArchitectureInfo                  = $PayloadArchitectureInfo
+        PayloadArchitectures                     = $PayloadArchitectures
+        DependencyInfo                           = $PayloadDependencyInfo
+        InstallerSwitches                        = $InstallerSwitches
+        InstallModes                             = $InstallModes
+        InstallerSuccessCodes                    = @($Context.Trailer.Profile.InstallerSuccessCodes)
+        SupportsSilentInstallation               = $SupportsSilentInstallation
+        RuntimeCommandLineEvidence               = $RuntimeCommandLineEvidence
+        LicenseDialogSelected                    = $LicenseDialogSelected
+        LicenseAcceptanceRequired                = $LicenseRequired
+        UserInformationBlocksSilent              = $UserInformationBlocksSilent
+        SilentInstallationDefault                = $Configuration.SilentInstallationDefault
+        NoUninstallation                         = $Configuration.NoUninstallation
+        X64ComplianceMode                        = $Configuration.X64ComplianceMode
+        RequireAdmin                             = $Configuration.RequireAdmin
+        Trailer                                  = $Context.Trailer
+        Footer                                   = $Context.Footer
+        Configuration                            = $Configuration
+        ParserVersionInfo                        = [pscustomobject]@{ Parser = 'Astrum InstallWizard'; CatalogVersion = [int]$Script:AstrumFormatCatalog.CatalogVersion; FormatId = [string]$Context.Trailer.FormatId; FormatGeneration = $Context.Trailer.FormatGeneration; ConfigurationProfile = $Configuration.ConfigurationProfile; ConfigurationProfileObservedVersionRange = $Configuration.ConfigurationProfileObservedVersionRange; RuntimeFormat = $Configuration.RuntimeFormat; ContainerRoute = $ResolvedContainer.ContainerRoute; Evidence = @('validated catalog-selected trailer/footer', 'twice checksum-protected configuration', 'installation-item and file catalogs', 'compiled standard-dialog resources', 'bounded native runtime command-line option table', 'catalog-selected configuration and file descriptors') }
+        Diagnostics                              = @(Merge-InstallerDiagnostics -Diagnostic @($Diagnostics))
+        UnresolvedFields                         = @($UnresolvedFields | Sort-Object -Unique)
       }
     } finally {
       Close-AstrumInstallWizardContainer -Container $ResolvedContainer
@@ -1782,13 +2185,14 @@ function Expand-AstrumInstallWizard {
       $Context = $ResolvedContainer.Context
       $Pattern = [string]::IsNullOrWhiteSpace($Name) ? '*' : $Name
       $Selected = @($Context.Files | Where-Object { Test-ExtractionPattern -Path $_.Path -Pattern $Pattern })
-      $InstallLocation = ConvertTo-AstrumManifestPath -Value $Context.Configuration.InstallPath -Configuration $Context.Configuration
-      $RegistryWrites = @(ConvertTo-AstrumRegistryWrites -Configuration $Context.Configuration -InstallLocation $InstallLocation -RegistryView default)
+      $RegistryView = $Context.Configuration.X64ComplianceMode ? '64-bit' : '32-bit'
+      $InstallLocation = ConvertTo-AstrumManifestPath -Value $Context.Configuration.InstallPath -Configuration $Context.Configuration -RegistryView $RegistryView
+      $RegistryWrites = @(ConvertTo-AstrumRegistryWrites -Configuration $Context.Configuration -InstallLocation $InstallLocation -RegistryView $RegistryView)
       $PrimaryArp = @(Get-AstrumArpEntries -RegistryWrites $RegistryWrites | Where-Object IsVisible | Select-Object -First 1)[0]
       $UninstallerRelativePath = if ($Context.Footer.UninstallerCompressedSize -gt 0) {
         $FromArp = $PrimaryArp ? (Get-AstrumUninstallerRelativePath -UninstallString $PrimaryArp.UninstallString -InstallLocation $InstallLocation) : $null
         if ($FromArp) { $FromArp } else {
-          $ConfiguredUninstaller = Resolve-AstrumVariables -Value $Context.Configuration.UninstallerName -Configuration $Context.Configuration -InstallLocation $InstallLocation
+          $ConfiguredUninstaller = Resolve-AstrumVariables -Value $Context.Configuration.UninstallerName -Configuration $Context.Configuration -InstallLocation $InstallLocation -RegistryView $RegistryView
           Get-AstrumUninstallerRelativePath -UninstallString $ConfiguredUninstaller -InstallLocation $InstallLocation
         }
       } else { $null }

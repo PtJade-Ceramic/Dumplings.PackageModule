@@ -17,6 +17,8 @@ param (
   [string]$BurnPath,
   [string]$MsiPath,
   [string]$TauriPath,
+  [string]$ActualInstallerPath,
+  [string]$ActualInstallerCompanionFile,
   [string]$OutputPath
 )
 
@@ -138,6 +140,14 @@ $Results = @(
   }
   if ($TauriPath) {
     Invoke-InstallerParserBenchmark -Name TauriExecutable -Path $TauriPath -Expression ". .\Modules\PackageModule\Index.ps1; Get-TauriExecutableInfo -Path `$InstallerPath"
+  }
+  if ($ActualInstallerPath) {
+    $CompanionArgument = if ($ActualInstallerCompanionFile) {
+      $ResolvedCompanion = (Get-Item -LiteralPath $ActualInstallerCompanionFile -Force).FullName.Replace("'", "''")
+      " -CompanionFile '$ResolvedCompanion'"
+    } else { '' }
+    Invoke-InstallerParserBenchmark -Name ActualInstallerInfo -Path $ActualInstallerPath -InitializationExpression '. .\Modules\PackageModule\Index.ps1' -Expression "Get-ActualInstallerInfo -Path `$InstallerPath$CompanionArgument"
+    Invoke-InstallerParserBenchmark -Name ActualInstallerExtract -Path $ActualInstallerPath -InitializationExpression '. .\Modules\PackageModule\Index.ps1' -Expression "`$DestinationPath = Join-Path ([IO.Path]::GetTempPath()) ('Dumplings-ActualInstallerBenchmark-' + [guid]::NewGuid().ToString('N')); try { Expand-ActualInstallerInstaller -Path `$InstallerPath$CompanionArgument -DestinationPath `$DestinationPath -CollisionAction Rename } finally { Remove-Item -LiteralPath `$DestinationPath -Recurse -Force -ErrorAction SilentlyContinue }"
   }
 ) | Where-Object { $null -ne $_ }
 
