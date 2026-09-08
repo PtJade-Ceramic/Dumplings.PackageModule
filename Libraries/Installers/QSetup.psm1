@@ -1505,20 +1505,25 @@ function Get-QSetupStructuredOperationInfo {
   $Xml = [Collections.Generic.List[object]]::new()
   $Diagnostics = [Collections.Generic.List[object]]::new()
   foreach ($Definition in @(
-      @{ Name = 'SET_PERFORM_REGISTRY_OP'; Target = $Registry; Parser = 'Registry' },
-      @{ Name = 'SET_PERFORM_INI_OP'; Target = $Ini; Parser = 'Ini' },
-      @{ Name = 'SET_PERFORM_XML_OP'; Target = $Xml; Parser = 'Xml' }
+      @{ Names = @('SET_PERFORM_REGISTRY_OP'); Target = $Registry; Parser = 'Registry' },
+      # Composer 12 writes SET_PERFORM_INIFILE_OP/SET_PERFORM_XMLFILE_OP (controlled QSReg build);
+      # older documentation and synthetic samples used the short names.
+      @{ Names = @('SET_PERFORM_INI_OP', 'SET_PERFORM_INIFILE_OP'); Target = $Ini; Parser = 'Ini' },
+      @{ Names = @('SET_PERFORM_XML_OP', 'SET_PERFORM_XMLFILE_OP'); Target = $Xml; Parser = 'Xml' }
     )) {
-    foreach ($Value in @($Directive[$Definition.Name] | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_) })) {
-      try {
-        $Parsed = switch ($Definition.Parser) {
-          'Registry' { ConvertFrom-QSetupRegistryOperation -Content ([string]$Value) -Directive $Directive }
-          'Ini' { ConvertFrom-QSetupIniOperation -Content ([string]$Value) -Directive $Directive }
-          'Xml' { ConvertFrom-QSetupXmlOperation -Content ([string]$Value) -Directive $Directive }
+    foreach ($Name in $Definition.Names) {
+      foreach ($Value in @($Directive[$Name] | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_) })) {
+        try {
+          $Parsed = switch ($Definition.Parser) {
+            'Registry' { ConvertFrom-QSetupRegistryOperation -Content ([string]$Value) -Directive $Directive }
+            'Ini' { ConvertFrom-QSetupIniOperation -Content ([string]$Value) -Directive $Directive }
+            'Xml' { ConvertFrom-QSetupXmlOperation -Content ([string]$Value) -Directive $Directive }
+          }
+          $Parsed.Source = $Name
+          $Definition.Target.Add($Parsed)
+        } catch {
+          $Diagnostics.Add((New-InstallerDiagnostic -Id "QSetup.Operation.$($Definition.Parser).Malformed" -Source QSetup -Message $_.Exception.Message -Kind Incomplete -Areas Metadata -Evidence @{ Directive = $Name; RawValue = [string]$Value }))
         }
-        $Definition.Target.Add($Parsed)
-      } catch {
-        $Diagnostics.Add((New-InstallerDiagnostic -Id "QSetup.Operation.$($Definition.Parser).Malformed" -Source QSetup -Message $_.Exception.Message -Kind Incomplete -Areas Metadata -Evidence @{ Directive = $Definition.Name; RawValue = [string]$Value }))
       }
     }
   }
