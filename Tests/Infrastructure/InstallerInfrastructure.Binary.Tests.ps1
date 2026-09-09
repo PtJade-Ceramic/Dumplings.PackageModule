@@ -115,6 +115,20 @@ Describe 'Bounded binary streams' {
     finally { $Destination.Dispose(); $Source.Dispose() }
   }
 
+  It 'computes a stream CRC32 and consumed length in one bounded pass' {
+    $Source = [IO.MemoryStream]::new([Text.Encoding]::ASCII.GetBytes('123456789'))
+    $Source.Position = 2
+    try {
+      $Result = [Dumplings.InstallerInfrastructure.BinaryIO]::Crc32WithLength($Source, $true, 7, [byte[]](0x21))
+      $Result.Checksum | Should -Be (Get-BinaryCrc32 -Bytes ([Text.Encoding]::ASCII.GetBytes('3456789!')))
+      $Result.Length | Should -Be 8
+      $Source.Position | Should -Be 2
+
+      { [Dumplings.InstallerInfrastructure.BinaryIO]::Crc32WithLength($Source, $true, 6, $null) } | Should -Throw
+      $Source.Position | Should -Be 2
+    } finally { $Source.Dispose() }
+  }
+
   It 'copies and decodes a bounded fixed-XOR stream' {
     $Source = [IO.MemoryStream]::new([byte[]](0xC0, 0xED, 0xE4, 0xE4, 0xE7))
     $Destination = [IO.MemoryStream]::new()

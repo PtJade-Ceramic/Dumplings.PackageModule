@@ -114,6 +114,11 @@ Describe 'DeployMaster static parser' {
     $Info.ParserVersionInfo.FormatProfile | Should -Be 'ClassicBZip2'
     @($Info.Diagnostics | Where-Object Id -EQ 'DeployMaster.Metadata.ClassicArpUnresolved') | Should -BeNullOrEmpty
     @($Info.Diagnostics | Where-Object Id -EQ 'DeployMaster.Installability.ClassicInteractiveOnly').Count | Should -Be 1
+    @($Info.Diagnostics | Where-Object Id -EQ 'DeployMaster.Installability.SupportDllEffectsOpaque').Count | Should -Be 1
+    $Info.SupportDlls | Should -HaveCount 1
+    $Info.SupportDlls[0].Architecture | Should -Be 'x86'
+    $Info.SupportDlls[0].FileName | Should -Be 'InstallDemo.dll'
+    $Info.UnresolvedFields | Should -Contain 'SupportDllEffects'
     $Files.Count | Should -Be 1
     $Files[0].Length | Should -Be 3555
     (Get-DumplingsTestFixtureHash -Path $Files[0].FullName) | Should -Be 'F699A4CD7A5FCB943A9FF576468C4C41374E582326F6813D008ECAF8A5E378E1'
@@ -203,6 +208,8 @@ Describe 'DeployMaster static parser' {
     $Info.InstallModes | Should -Be @('interactive', 'silent')
     $Info.CommandLineSwitches.Portable | Should -Be '/portable "<PATH>"'
     $Info.CommandLineSwitches.InstallForAllUsers | Should -Be '/userall'
+    $Info.CommandLineSwitches.SkipElevation | Should -Be '/noadmin'
+    $Info.CommandLineSwitches.PSObject.Properties.Name | Should -Not -Contain 'InstallForCurrentUser'
     $Info.AppsAndFeaturesEntries.Count | Should -Be 1
     $Info.AppsAndFeaturesEntries[0].ProductCode | Should -Be 'DMDeployMasterKnown'
     $Info.BuiltInRegistration | Should -BeNullOrEmpty
@@ -269,11 +276,11 @@ Describe 'DeployMaster static parser' {
   }
 
   $HistoricalProfiles = @(
-    @{ Version = '6.0.1'; Profile = 'Header66'; HeaderSize = 66; FileCount = 17; Range = '6.0.1-6.1.2'; UninstallRoute = 'UnquotedExecutableQuotedLog'; HasWindows10Bounds = $false; HasUserAllSwitch = $false; HasPackageSettings = $false }
-    @{ Version = '6.5.1'; Profile = 'Header70'; HeaderSize = 70; FileCount = 17; Range = '6.5.1-7.1.1'; UninstallRoute = 'UnquotedExecutableQuotedLog'; HasWindows10Bounds = $true; HasUserAllSwitch = $true; HasPackageSettings = $false }
-    @{ Version = '7.1.1'; Profile = 'Header70'; HeaderSize = 70; FileCount = 17; Range = '6.5.1-7.1.1'; UninstallRoute = 'UnquotedExecutableQuotedLog'; HasWindows10Bounds = $true; HasUserAllSwitch = $true; HasPackageSettings = $false }
-    @{ Version = '7.2.0'; Profile = 'Header74'; HeaderSize = 74; FileCount = 21; Range = '7.2.0-7.7.0'; UninstallRoute = 'QuotedExecutableAndLog'; HasWindows10Bounds = $true; HasUserAllSwitch = $true; HasPackageSettings = $true }
-    @{ Version = '7.6.0'; Profile = 'Header74'; HeaderSize = 74; FileCount = 21; Range = '7.2.0-7.7.0'; UninstallRoute = 'QuotedExecutableAndLog'; HasWindows10Bounds = $true; HasUserAllSwitch = $true; HasPackageSettings = $true }
+    @{ Version = '6.0.1'; Profile = 'Header66'; HeaderSize = 66; FileCount = 17; Range = '6.0.1-6.1.2'; UninstallRoute = 'UnquotedExecutableQuotedLog'; HasWindows10Bounds = $false; HasUserAllSwitch = $false; HasPackageSettings = $false; HasSkipElevationSwitch = $false }
+    @{ Version = '6.5.1'; Profile = 'Header70'; HeaderSize = 70; FileCount = 17; Range = '6.5.1-7.1.1'; UninstallRoute = 'UnquotedExecutableQuotedLog'; HasWindows10Bounds = $true; HasUserAllSwitch = $true; HasPackageSettings = $false; HasSkipElevationSwitch = $true }
+    @{ Version = '7.1.1'; Profile = 'Header70'; HeaderSize = 70; FileCount = 17; Range = '6.5.1-7.1.1'; UninstallRoute = 'UnquotedExecutableQuotedLog'; HasWindows10Bounds = $true; HasUserAllSwitch = $true; HasPackageSettings = $false; HasSkipElevationSwitch = $true }
+    @{ Version = '7.2.0'; Profile = 'Header74'; HeaderSize = 74; FileCount = 21; Range = '7.2.0-7.7.0'; UninstallRoute = 'QuotedExecutableAndLog'; HasWindows10Bounds = $true; HasUserAllSwitch = $true; HasPackageSettings = $true; HasSkipElevationSwitch = $true }
+    @{ Version = '7.6.0'; Profile = 'Header74'; HeaderSize = 74; FileCount = 21; Range = '7.2.0-7.7.0'; UninstallRoute = 'QuotedExecutableAndLog'; HasWindows10Bounds = $true; HasUserAllSwitch = $true; HasPackageSettings = $true; HasSkipElevationSwitch = $true }
   )
   It 'Should classify archived signed runtime <Version> with the <Profile> structural profile' -ForEach $HistoricalProfiles {
     $FixturePath = Join-Path (Join-Path $Script:DeployMasterHistoricalFixtureDirectory $Version) 'SetupDeployMasterDemo.exe'
@@ -293,6 +300,8 @@ Describe 'DeployMaster static parser' {
     }
     $Info.CommandLineSwitches.Portable | Should -BeNullOrEmpty
     $Info.CommandLineSwitches.InstallForAllUsers | Should -Be ($HasUserAllSwitch ? '/userall' : $null)
+    $Info.CommandLineSwitches.SkipElevation | Should -Be ($HasSkipElevationSwitch ? '/noadmin' : $null)
+    $Info.CommandLineSwitches.PSObject.Properties.Name | Should -Not -Contain 'InstallForCurrentUser'
     $Info.OverlayInfo.UninstallCommandRoute | Should -Be $UninstallRoute
     $Info.BuiltInRegistrationVariants.Count | Should -Be 4
     $Info.BuiltInRegistrationVariants.Architecture | Sort-Object -Unique | Should -Be @('x64', 'x86')

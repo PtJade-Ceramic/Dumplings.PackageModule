@@ -1445,15 +1445,16 @@ function Test-DeployMasterRuntimeSwitch {
   .PARAMETER Header
     Validated package header containing raw-LZMA properties and bounded runtime-core ranges.
   .PARAMETER CommandLineSwitch
-    Literal slash-prefixed switch to locate in the runtime string table.
+    One or more literal slash-prefixed switches to locate in the runtime string table. Results are
+    returned in the same order, allowing one bounded runtime expansion to serve several probes.
   .PARAMETER MaximumCoreBytes
     Maximum uncompressed runtime-core size accepted for this optional feature probe.
   #>
-  [OutputType([bool])]
+  [OutputType([bool[]])]
   param (
     [Parameter(Mandatory)][IO.Stream]$Stream,
     [Parameter(Mandatory)][psobject]$Header,
-    [Parameter(Mandatory)][ValidatePattern('^/[A-Za-z0-9]+$')][string]$CommandLineSwitch,
+    [Parameter(Mandatory)][ValidatePattern('^/[A-Za-z0-9]+$')][string[]]$CommandLineSwitch,
     [ValidateRange(1, 268435456)][long]$MaximumCoreBytes = 134217728
   )
 
@@ -1463,8 +1464,12 @@ function Test-DeployMasterRuntimeSwitch {
   $OutputStream = [IO.MemoryStream]::new([int][Math]::Min($Core.UncompressedSize, [int]::MaxValue))
   try {
     $null = Expand-InstallerCompressedStream -Algorithm Lzma -Stream $InputStream -Destination $OutputStream -MaximumBytes $MaximumCoreBytes -Properties $Header.LzmaProperties -CompressedSize $Core.CompressedSize -UncompressedSize $Core.UncompressedSize
-    $Pattern = [Text.Encoding]::Unicode.GetBytes($CommandLineSwitch)
-    return @(Find-BinaryPattern -Stream $OutputStream -Pattern $Pattern -Maximum 1).Count -eq 1
+    $Results = [Collections.Generic.List[bool]]::new($CommandLineSwitch.Count)
+    foreach ($RequestedSwitch in $CommandLineSwitch) {
+      $Pattern = [Text.Encoding]::Unicode.GetBytes($RequestedSwitch)
+      $Results.Add(@(Find-BinaryPattern -Stream $OutputStream -Pattern $Pattern -Maximum 1).Count -eq 1)
+    }
+    return $Results.ToArray()
   } finally {
     $InputStream.Dispose()
     $OutputStream.Dispose()
@@ -2853,14 +2858,24 @@ function Read-DeployMasterPackageData {
   $RuntimeFeatures = [pscustomobject]@{
     PortableSwitch         = $false
     PortableSwitchAnalyzed = $false
+    SkipElevationSwitch    = $false
+    SkipElevationAnalyzed  = $false
   }
-  if ($PackageSettings -and $PackageSettings.PortableInstallationMode -ne 'Never') {
-    try {
-      $RuntimeFeatures.PortableSwitch = Test-DeployMasterRuntimeSwitch -Stream $Stream -Header $Header -CommandLineSwitch '/portable'
+  # Command support lives in the compressed runtime, not the package header. Probe every relevant
+  # token in one expansion and do not extrapolate /noadmin back to Header66, where it is absent.
+  $RequestedRuntimeSwitches = [Collections.Generic.List[string]]::new()
+  $RequestedRuntimeSwitches.Add('/noadmin')
+  if ($PackageSettings -and $PackageSettings.PortableInstallationMode -ne 'Never') { $RequestedRuntimeSwitches.Add('/portable') }
+  try {
+    $RuntimeSwitchResults = @(Test-DeployMasterRuntimeSwitch -Stream $Stream -Header $Header -CommandLineSwitch $RequestedRuntimeSwitches.ToArray())
+    $RuntimeFeatures.SkipElevationSwitch = $RuntimeSwitchResults[0]
+    $RuntimeFeatures.SkipElevationAnalyzed = $true
+    if ($RequestedRuntimeSwitches.Count -gt 1) {
+      $RuntimeFeatures.PortableSwitch = $RuntimeSwitchResults[1]
       $RuntimeFeatures.PortableSwitchAnalyzed = $true
-    } catch {
-      $Warnings.Add((New-InstallerDiagnostic -Id 'DeployMaster.Installability.RuntimeSwitchInspectionIncomplete' -Source 'DeployMaster' -Message "The DeployMaster runtime core could not be inspected for version-dependent command-line switches: $($_.Exception.Message)" -Kind Incomplete -Areas Installability -AffectedFields InstallerSwitches, InstallModes -Evidence $_.Exception.Message))
     }
+  } catch {
+    $Warnings.Add((New-InstallerDiagnostic -Id 'DeployMaster.Installability.RuntimeSwitchInspectionIncomplete' -Source 'DeployMaster' -Message "The DeployMaster runtime core could not be inspected for version-dependent command-line switches: $($_.Exception.Message)" -Kind Incomplete -Areas Installability -AffectedFields InstallerSwitches, InstallModes -Evidence $_.Exception.Message))
   }
 
   [pscustomobject]@{
@@ -3207,6 +3222,12 @@ function ConvertTo-DeployMasterClassicInfo {
       [pscustomobject]@{ Architecture = 'x86'; FileName = $Identity.SupportDll32FileName }
     }
   )
+  if ($SupportDlls.Count) {
+    # The classic runtime invokes the packaged support DLL the same way modern media does, so its
+    # custom validation and post-install effects need the same manual-validation warning.
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'DeployMaster.Installability.SupportDllEffectsOpaque' -Source 'DeployMaster' -Message 'The installer invokes one or more DeployMaster support DLLs. Their custom validation, folder, registry, and post-install effects require separate static inspection or VM validation.' -Kind ManualValidation -Areas Metadata, Installability, Security -Evidence $SupportDlls))
+    $UnresolvedFields.Add('SupportDllEffects')
+  }
   return [pscustomobject][ordered]@{
     Path                                  = $File.FullName
     InstallerType                         = 'exe'
@@ -3580,6 +3601,7 @@ function Get-DeployMasterInfo {
         ForceX86                 = if ($ApplicationArchitectureMode -eq 'x86AndX64Application') { '/32' } else { $null }
         Portable                 = if ($PackageData.RuntimeFeatures.PortableSwitch) { '/portable "<PATH>"' } else { $null }
         InstallForAllUsers       = if ($PackageData.Header.HasInstallForAllUsersSwitch -and $Identity.SupportsDualScope) { '/userall' } else { $null }
+        SkipElevation            = if ($PackageData.RuntimeFeatures.SkipElevationSwitch) { '/noadmin' } else { $null }
         TemporaryFolder          = '/temp "<PATH>"'
         InstallationFolders      = [ordered]@{
           Application = '/appfolder "<PATH>"'

@@ -621,6 +621,13 @@ function Get-InstallerStructuralExeFamilyCandidate {
     [pscustomobject]@{ Family = 'Zero Install'; Confidence = 'high'; MatchedMarkers = @('CLR ManifestResource ZeroInstall.BootstrapConfig.ini') }
   }
 
+  # dotNetInstaller requires exactly one bounded CUSTOM/RES_CONFIGURATION
+  # resource whose XML root is configurations. The focused probe does not stage
+  # cabinets, so this remains cheap and rejects marker-only application files.
+  if ((Test-DotNetInstaller -Path $File.FullName -Resource $Resources) -and $Seen.Add('dotNetInstaller')) {
+    [pscustomobject]@{ Family = 'dotNetInstaller'; Confidence = 'high'; MatchedMarkers = @('CUSTOM/RES_CONFIGURATION + configurations XML root') }
+  }
+
   # Astrum detection validates a generation-specific footer, source-backed legacy runtime identity,
   # protected configuration, and complete payload catalog rather than relying on marker strings.
   if ((Test-AstrumInstallWizard -Path $File.FullName) -and $Seen.Add('Astrum InstallWizard')) {

@@ -54,6 +54,55 @@ function Split-BootstrapperCommandLine {
   return @($Arguments)
 }
 
+function Find-BootstrapperCandidatePath {
+  <#
+  .SYNOPSIS
+    Match one command token to a deterministic embedded or supplied payload path.
+  .PARAMETER CandidatePath
+    Logical archive paths or resolved companion-file paths available to the wrapper.
+  .PARAMETER Token
+    Payload token from the configured command line.
+  .OUTPUTS
+    A result containing the selected path, resolution kind, and every ambiguous candidate.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [AllowEmptyCollection()][string[]]$CandidatePath = @(),
+    [AllowNull()][AllowEmptyString()][string]$Token
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Token)) {
+    return [pscustomobject]@{ Path = $null; Kind = 'None'; Matches = @() }
+  }
+
+  $NormalizedToken = $Token.Replace('/', '\').Trim('"')
+  $NormalizedCandidates = [Collections.Generic.List[object]]::new()
+  foreach ($Path in $CandidatePath) {
+    if ([string]::IsNullOrWhiteSpace($Path)) { continue }
+    $NormalizedCandidates.Add([pscustomobject]@{ Original = $Path; Normalized = $Path.Replace('/', '\').Trim('"') })
+  }
+
+  # Archive-relative paths are authoritative when the command line names them
+  # exactly. This also preserves the historical behavior for ordinary wrappers.
+  $CandidateMatches = @($NormalizedCandidates | Where-Object { $_.Normalized.Equals($NormalizedToken, [StringComparison]::OrdinalIgnoreCase) })
+  if ($CandidateMatches.Count -eq 1) { return [pscustomobject]@{ Path = $CandidateMatches[0].Original; Kind = 'Exact'; Matches = @($CandidateMatches.Original) } }
+  if ($CandidateMatches.Count -gt 1) { return [pscustomobject]@{ Path = $null; Kind = 'Ambiguous'; Matches = @($CandidateMatches.Original) } }
+
+  # Supplied companion files are represented by resolved host paths. Match the
+  # configured relative path against their trailing segments before falling
+  # back to a basename, allowing x86\setup.msi and x64\setup.msi to coexist.
+  $Suffix = '\' + $NormalizedToken.TrimStart('\')
+  $CandidateMatches = @($NormalizedCandidates | Where-Object { $_.Normalized.EndsWith($Suffix, [StringComparison]::OrdinalIgnoreCase) })
+  if ($CandidateMatches.Count -eq 1) { return [pscustomobject]@{ Path = $CandidateMatches[0].Original; Kind = 'Suffix'; Matches = @($CandidateMatches.Original) } }
+  if ($CandidateMatches.Count -gt 1) { return [pscustomobject]@{ Path = $null; Kind = 'Ambiguous'; Matches = @($CandidateMatches.Original) } }
+
+  $LeafName = [IO.Path]::GetFileName($NormalizedToken)
+  $CandidateMatches = @($NormalizedCandidates | Where-Object { [IO.Path]::GetFileName($_.Normalized).Equals($LeafName, [StringComparison]::OrdinalIgnoreCase) })
+  if ($CandidateMatches.Count -eq 1) { return [pscustomobject]@{ Path = $CandidateMatches[0].Original; Kind = 'FileName'; Matches = @($CandidateMatches.Original) } }
+  if ($CandidateMatches.Count -gt 1) { return [pscustomobject]@{ Path = $null; Kind = 'Ambiguous'; Matches = @($CandidateMatches.Original) } }
+  return [pscustomobject]@{ Path = $null; Kind = 'NotFound'; Matches = @() }
+}
+
 function Resolve-BootstrapperCommand {
   <#
   .SYNOPSIS
@@ -87,25 +136,27 @@ function Resolve-BootstrapperCommand {
   }
 
   $PayloadToken = if ($PayloadTokenIndex -ge 0 -and $PayloadTokenIndex -lt $Tokens.Count) { $Tokens[$PayloadTokenIndex] } else { $null }
-  $NormalizedToken = if ($PayloadToken) { $PayloadToken.Replace('/', '\').Trim('"') } else { $null }
   $SelectedPath = $null
-  if ($NormalizedToken) {
-    $SelectedPath = @($CandidatePath | Where-Object {
-        $Candidate = $_.Replace('/', '\')
-        $Candidate.Equals($NormalizedToken, [StringComparison]::OrdinalIgnoreCase) -or
-        [IO.Path]::GetFileName($Candidate).Equals([IO.Path]::GetFileName($NormalizedToken), [StringComparison]::OrdinalIgnoreCase)
-      } | Sort-Object Length -Descending | Select-Object -First 1)[0]
+  $ResolutionKind = 'None'
+  $CandidateMatches = @()
+  if ($PayloadToken) {
+    $Resolution = Find-BootstrapperCandidatePath -CandidatePath $CandidatePath -Token $PayloadToken
+    $SelectedPath = $Resolution.Path
+    $ResolutionKind = $Resolution.Kind
+    $CandidateMatches = @($Resolution.Matches)
   }
-  if (-not $SelectedPath) {
+  if (-not $SelectedPath -and $ResolutionKind -ne 'Ambiguous') {
     for ($Index = 1; $Index -lt $Tokens.Count; $Index++) {
-      $Token = $Tokens[$Index].Replace('/', '\').Trim('"')
-      $Candidate = @($CandidatePath | Where-Object {
-          $CandidateValue = $_.Replace('/', '\')
-          $CandidateValue.Equals($Token, [StringComparison]::OrdinalIgnoreCase) -or
-          [IO.Path]::GetFileName($CandidateValue).Equals([IO.Path]::GetFileName($Token), [StringComparison]::OrdinalIgnoreCase)
-        } | Sort-Object Length -Descending | Select-Object -First 1)[0]
-      if ($Candidate) {
-        $SelectedPath = $Candidate
+      $Resolution = Find-BootstrapperCandidatePath -CandidatePath $CandidatePath -Token $Tokens[$Index]
+      if ($Resolution.Kind -eq 'Ambiguous') {
+        $ResolutionKind = 'Ambiguous'
+        $CandidateMatches = @($Resolution.Matches)
+        break
+      }
+      if ($Resolution.Path) {
+        $SelectedPath = $Resolution.Path
+        $ResolutionKind = $Resolution.Kind
+        $CandidateMatches = @($Resolution.Matches)
         $PayloadToken = $Tokens[$Index]
         $PayloadTokenIndex = $Index
         break
@@ -126,6 +177,8 @@ function Resolve-BootstrapperCommand {
     ExecutedPayload  = $SelectedPath
     ArgumentList     = $ArgumentList
     IsResolved       = [bool]$SelectedPath
+    ResolutionKind   = $ResolutionKind
+    CandidateMatches = $CandidateMatches
   }
 }
 

@@ -130,6 +130,16 @@ Source: <https://github.com/lemutec/MicaSetup>
 
 `Assets/Source/MicaSetup/MicaSetupReader.cs` and `Libraries/Installers/MicaSetup.psm1` independently implement the compiled Pack/Option configuration, WPF resource, payload, scope, ARP, and system-effect behavior documented by MicaSetup's MIT-licensed source. PackageModule does not distribute or load a MicaSetup assembly.
 
+## Standart.Hash.xxHash
+
+Source: <https://github.com/uranium62/xxHash>
+
+The source-shipped files under `Assets/Source/Kachina` provide the XXH3-128 implementation used to validate Kachina payloads. Dumplings compiles this source in memory and does not require a separate hashing package or executable.
+
+Copyright (c) 2018 Melnik Alexander
+
+The complete MIT license is included at `Assets/Source/Kachina/LICENSE`.
+
 Copyright (c) 2023-2026 Contributors
 
 ## Tauri

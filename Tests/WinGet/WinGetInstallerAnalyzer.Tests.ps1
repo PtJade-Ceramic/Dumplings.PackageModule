@@ -214,6 +214,30 @@ Describe 'Installer manifest behavior defaults' {
     }
   }
 
+  It 'Should keep dotNetInstaller family defaults conservative and prefer parsed runtime capabilities' {
+    InModuleScope WinGetAnalysis {
+      $Defaults = (Get-WinGetInstallerFamilySuggestion -Family 'dotNetInstaller').ManifestFields
+      $Defaults.InstallModes | Should -Be @('interactive', 'silent')
+      $Defaults.InstallerSwitches.Silent | Should -Be '/q'
+      $Defaults.InstallerSwitches.PSObject.Properties.Name | Should -Not -Contain 'SilentWithProgress'
+      $Defaults.InstallerSwitches.Silent | Should -Not -Match 'ComponentArgs'
+
+      $Parsed = Get-WinGetParserResultSuggestion -Result ([pscustomobject]@{
+          Family        = 'dotNetInstaller'
+          InstallerType = 'exe'
+          Metadata      = [pscustomobject]@{
+            InstallModes       = @('interactive', 'silent', 'silentWithProgress')
+            NestedInstallModes = @('interactive', 'silent', 'silentWithProgress')
+            InstallerSwitches  = [ordered]@{ Silent = '/q /nosplash /noreboot'; SilentWithProgress = '/qb /noreboot'; Log = '/Log /LogFile "<LOGPATH>"' }
+          }
+        })
+
+      $Parsed.ManifestFields.InstallModes | Should -Be @('interactive', 'silent', 'silentWithProgress')
+      $Parsed.ManifestFields.InstallerSwitches.SilentWithProgress | Should -Be '/qb /noreboot'
+      $Parsed.ManifestFields.InstallerSwitches.Silent | Should -Not -Match 'ComponentArgs'
+    }
+  }
+
   It 'Should return schema-valid fields for every documented family projection' {
     InModuleScope WinGetAnalysis {
       $Families = @(

@@ -283,10 +283,10 @@ function Get-WinGetInstallerFamilyTemplate {
     'dotNetInstaller' {
       [pscustomobject]@{
         InstallerType       = 'exe'
-        InstallModes        = @('interactive', 'silent', 'silentWithProgress')
-        InstallerSwitches   = [ordered]@{ Silent = '/q /nosplash /ComponentArgs "*":"/quiet /norestart"'; SilentWithProgress = '/qb /ComponentArgs "*":"/passive /norestart"'; Log = '/Log /LogFile "<LOGPATH>"' }
+        InstallModes        = @('interactive', 'silent')
+        InstallerSwitches   = [ordered]@{ Silent = '/q' }
         ExpectedReturnCodes = @()
-        Notes               = @('Confirm bundled prerequisite handling and final ARP entry in a VM.')
+        Notes               = @('Use Get-DotNetInstallerInfo to add /qb, /nosplash, /noreboot, and logging only when the compiled runtime exposes those capabilities.', 'Do not add blanket /ComponentArgs values; dotNetInstaller already selects each component command for the requested UI mode.', 'Confirm conditional prerequisites and the final ARP owner in a VM when static filters remain ambiguous.')
       }
     }
     'IExpress' {
@@ -673,6 +673,25 @@ function Get-WinGetParserResultSuggestion {
       $Fields['InstallerSwitches'] = [ordered]@{ Silent = '/s' }
     } else {
       $NextSteps.Add("InstallShield InstallScript silent-support result is '$SilentSupport'; response-file-dependent media is not WinGet-compatible.")
+    }
+  }
+
+  if ($Family -ceq 'dotNetInstaller' -and $Metadata) {
+    # The outer runtime may accept /q or /qb while a selected nested component
+    # falls back to its full command. Suggest only modes proven across the
+    # default component routes; retain outer capabilities on the parser result.
+    $NestedModeValue = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name NestedInstallModes
+    $NestedModes = @(if (Test-WinGetSuggestionValue -Value $NestedModeValue) { $NestedModeValue })
+    if ($NestedModes.Count -gt 0) { $Fields['InstallModes'] = $NestedModes }
+    $Switches = Get-WinGetSuggestionPropertyValue -InputObject $Fields -Name InstallerSwitches
+    if ($NestedModes.Count -gt 0 -and $Switches -is [Collections.IDictionary]) {
+      $FilteredSwitches = [ordered]@{}
+      foreach ($Key in $Switches.Keys) {
+        if ($Key -ceq 'Silent' -and $NestedModes -notcontains 'silent') { continue }
+        if ($Key -ceq 'SilentWithProgress' -and $NestedModes -notcontains 'silentWithProgress') { continue }
+        $FilteredSwitches[$Key] = Copy-WinGetManifestValue -Value $Switches[$Key]
+      }
+      if ($FilteredSwitches.Count -gt 0) { $Fields['InstallerSwitches'] = $FilteredSwitches } else { $Fields.Remove('InstallerSwitches') }
     }
   }
 

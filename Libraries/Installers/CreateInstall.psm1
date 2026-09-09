@@ -19,7 +19,8 @@
 #     +14 flags:u32, +1A header-size:u32, +1E summary-size:i64
 #     +26 info-size:u32, +2A/+32/+3A archive/volume sizes:i64
 #     +42 moved-size:u32, +46 memory/block/solid multipliers
-#     `-- catalog -> [order:u8][packed-size:u32/u64][packed data]*
+#     +-- catalog -> [order:u8][packed-size:u32/u64][packed data]*
+#     `-- optional companions -> [GEA\0][volume:u16][id:u32][data]
 #         +-- type 0: stored bytes
 #         +-- type 1: LZGE adaptive-Huffman stream
 #         `-- type 2: modified PPMd-I range stream + end marker
@@ -39,11 +40,12 @@
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
 $Script:CreateInstallFormatCatalog = Import-PowerShellDataFile -LiteralPath (Join-Path $PSScriptRoot 'CreateInstallFormatCatalog.psd1')
-if ([int]$Script:CreateInstallFormatCatalog.CatalogVersion -ne 2) { throw "Unsupported CreateInstall format catalog version '$($Script:CreateInstallFormatCatalog.CatalogVersion)'." }
+if ([int]$Script:CreateInstallFormatCatalog.CatalogVersion -ne 4) { throw "Unsupported CreateInstall format catalog version '$($Script:CreateInstallFormatCatalog.CatalogVersion)'." }
 
 $Script:CreateInstallMaximumHeaderBytes = 268435456
 $Script:CreateInstallMaximumInfoBytes = 268435456
 $Script:CreateInstallMaximumEntries = 1000000
+$Script:CreateInstallMaximumVolumes = 1024
 $Script:CreateInstallMaximumBlockBytes = 268435456
 $Script:CreateInstallMaximumGenteeBytes = 67108864
 $Script:CreateInstallMaximumAnalysisBytes = 268435456
@@ -285,6 +287,10 @@ function Get-CreateInstallGenteeRecord {
   $HeaderSize = [BitConverter]::ToUInt32($Bytes, 12)
   $ProgramSize = [BitConverter]::ToUInt32($Bytes, 16)
   if ($HeaderSize -lt 22 -or $HeaderSize -gt $ProgramSize -or $ProgramSize -gt $Bytes.Length -or $ProgramSize -gt $Script:CreateInstallMaximumGenteeBytes) { throw 'The Gentee GE header declares invalid bounds' }
+  # Match the reference Gentee ge_load validation: the header CRC covers bytes 12..ProgramSize and
+  # Gentee's crc() applies no final inversion, so the standard CRC32 is inverted for comparison.
+  $StoredCrc = [BitConverter]::ToUInt32($Bytes, 8)
+  if (((Get-BinaryCrc32 -Bytes $Bytes -Offset 12 -Count ([int]$ProgramSize - 12)) -bxor [uint32]::MaxValue) -ne $StoredCrc) { throw 'The Gentee GE program fails its header CRC check' }
   $ProgramProfile = @($Script:CreateInstallFormatCatalog.ProgramProfiles | Where-Object { [int]$_.MajorVersion -eq [int]$Bytes[20] })
   if ($ProgramProfile.Count -ne 1) { throw "Unsupported Gentee GE major version '$($Bytes[20])'" }
 
@@ -365,19 +371,20 @@ function Get-CreateInstallGenteeProgram {
   $Records = @(Get-CreateInstallGenteeRecord -Bytes $ProgramBytes)
   $ProgramProfile = @($Script:CreateInstallFormatCatalog.ProgramProfiles | Where-Object { [int]$_.MajorVersion -eq [int]$ProgramBytes[20] })[0]
   return [pscustomobject]@{
-    Bytes             = $ProgramBytes
-    Records           = $Records
-    LauncherOffset    = [long]$HeaderOffsets[0]
-    SectionOffset     = [long]$Section[0].RawOffset
-    RuntimeSize       = [long]$RuntimeSize
-    StoredProgramSize = [long]$ProgramRangeSize
-    ProgramSize       = [long]$ProgramBytes.Length
-    Packed            = $Packed
-    VersionMajor      = [int]$ProgramBytes[20]
-    VersionMinor      = [int]$ProgramBytes[21]
-    ProgramProfile    = [string]$ProgramProfile.Id
-    CommandCache      = [System.Collections.Generic.Dictionary[uint32, object]]::new()
-    FunctionIndex     = $null
+    Bytes                 = $ProgramBytes
+    Records               = $Records
+    LauncherOffset        = [long]$HeaderOffsets[0]
+    SectionOffset         = [long]$Section[0].RawOffset
+    RuntimeSize           = [long]$RuntimeSize
+    StoredProgramSize     = [long]$ProgramRangeSize
+    ProgramSize           = [long]$ProgramBytes.Length
+    Packed                = $Packed
+    VersionMajor          = [int]$ProgramBytes[20]
+    VersionMinor          = [int]$ProgramBytes[21]
+    ProgramProfile        = [string]$ProgramProfile.Id
+    CommandCache          = [System.Collections.Generic.Dictionary[uint32, object]]::new()
+    FunctionIndex         = $null
+    ExternalFunctionIndex = $null
   }
 }
 
@@ -536,6 +543,7 @@ function Get-CreateInstallProjectVariableEvidence {
 
   # CreateInstall initializes g_list as a Gentee buf global. Optimized GE files omit the global
   # name, so candidate offsets come only from integer literals actually referenced by bytecode.
+  $Functions = Get-CreateInstallFunctionIndex -Program $Program
   $Buffers = [System.Collections.Generic.List[object]]::new()
   foreach ($Record in @($Program.Records | Where-Object Type -EQ 6)) {
     $Cursor = [pscustomobject]@{ Value = [int]$Record.PayloadOffset }
@@ -547,8 +555,8 @@ function Get-CreateInstallProjectVariableEvidence {
   }
 
   $ReferencedOffsets = [System.Collections.Generic.HashSet[uint32]]::new()
-  foreach ($Record in @($Program.Records | Where-Object Type -EQ 3)) {
-    foreach ($Command in @(Get-CreateInstallGenteeCommand -Program $Program -Record $Record)) {
+  foreach ($Function in $Functions.Values) {
+    foreach ($Command in $Function.Commands) {
       if ($Command.Command -in @(25, 26, 27) -and $Command.Operand -is [ValueType]) { $null = $ReferencedOffsets.Add([uint32]$Command.Operand) }
     }
   }
@@ -717,16 +725,779 @@ function Get-CreateInstallFunctionIndex {
 
   if ($null -ne $Program.FunctionIndex) { return $Program.FunctionIndex }
   $Functions = [System.Collections.Generic.Dictionary[uint32, object]]::new()
+  $ExternalFunctions = Get-CreateInstallGenteeExternalFunctionIndex -Program $Program
   foreach ($Record in @($Program.Records | Where-Object Type -EQ 3)) {
+    $Commands = @(Get-CreateInstallGenteeCommand -Program $Program -Record $Record)
     $Functions[[uint32]$Record.Id] = [pscustomobject]@{
       Record         = $Record
       ParameterCount = Get-CreateInstallGenteeParameterCount -Program $Program -Record $Record
-      Commands       = @(Get-CreateInstallGenteeCommand -Program $Program -Record $Record)
+      Commands       = $Commands
+      StringLiterals = [string[]]@($Commands | Where-Object Command -EQ 34 | ForEach-Object { [string]$_.Operand })
+      ExternalCalls  = [object[]]@($Commands | Where-Object { $ExternalFunctions.ContainsKey([uint32]$_.Command) } | ForEach-Object { $ExternalFunctions[[uint32]$_.Command] })
       LiteralText    = [Text.Encoding]::ASCII.GetString($Program.Bytes, $Record.PayloadOffset, $Record.EndOffset - $Record.PayloadOffset)
     }
   }
   $Program.FunctionIndex = $Functions
   return $Functions
+}
+
+function Get-CreateInstallGenteeExternalFunctionIndex {
+  <#
+  .SYNOPSIS
+    Decode linked-library and imported-function records from a GE program.
+  .PARAMETER Program
+    Decoded GE program returned by Get-CreateInstallGenteeProgram. The result is cached on this
+    object and no linked library body is loaded or executed.
+  #>
+  [OutputType([System.Collections.Generic.Dictionary[uint32, object]])]
+  param ([Parameter(Mandatory)][psobject]$Program)
+
+  if ($Program.PSObject.Properties['ExternalFunctionIndex'] -and $null -ne $Program.ExternalFunctionIndex) { return $Program.ExternalFunctionIndex }
+  $Imports = [System.Collections.Generic.Dictionary[uint32, string]]::new()
+  foreach ($Record in @($Program.Records | Where-Object Type -EQ 8)) {
+    $Cursor = [pscustomobject]@{ Value = [int]$Record.PayloadOffset }
+    $Filename = Read-CreateInstallGenteeString -Bytes $Program.Bytes -Cursor $Cursor -Limit $Record.EndOffset
+    if (($Record.Flags -band 0x0100) -ne 0) {
+      if ($Cursor.Value + 4 -gt $Record.EndOffset) { throw 'A linked Gentee import has a truncated size' }
+      $LinkedSize = [BitConverter]::ToUInt32($Program.Bytes, $Cursor.Value)
+      $Cursor.Value += 4
+      if ($LinkedSize -gt $Record.EndOffset - $Cursor.Value) { throw 'A linked Gentee import body exceeds its object record' }
+      $Cursor.Value += [int]$LinkedSize
+    }
+    if ($Cursor.Value -ne $Record.EndOffset) { throw 'A Gentee import record contains trailing data' }
+    $Imports[[uint32]$Record.Id] = $Filename
+  }
+
+  $ExternalFunctions = [System.Collections.Generic.Dictionary[uint32, object]]::new()
+  foreach ($Record in @($Program.Records | Where-Object Type -EQ 4)) {
+    $Cursor = [pscustomobject]@{ Value = [int]$Record.PayloadOffset }
+    $null = Read-CreateInstallGenteeVariable -Bytes $Program.Bytes -Cursor $Cursor -Limit $Record.EndOffset
+    $ParameterCount = Read-CreateInstallGenteeBwd -Bytes $Program.Bytes -Cursor $Cursor -Limit $Record.EndOffset
+    for ($Index = 0; $Index -lt $ParameterCount; $Index++) { Move-CreateInstallGenteeVariable -Bytes $Program.Bytes -Cursor $Cursor -Limit $Record.EndOffset }
+    if (($Record.Flags -band 0x080000) -eq 0) { continue }
+    $ImportId = Read-CreateInstallGenteeBwd -Bytes $Program.Bytes -Cursor $Cursor -Limit $Record.EndOffset
+    $OriginalName = Read-CreateInstallGenteeString -Bytes $Program.Bytes -Cursor $Cursor -Limit $Record.EndOffset
+    if ($Cursor.Value -ne $Record.EndOffset) { throw 'An imported Gentee function record contains trailing data' }
+    $ExternalFunctions[[uint32]$Record.Id] = [pscustomobject]@{
+      Id             = [uint32]$Record.Id
+      Name           = $OriginalName
+      ParameterCount = [uint32]$ParameterCount
+      ImportId       = [uint32]$ImportId
+      Library        = $Imports.ContainsKey([uint32]$ImportId) ? $Imports[[uint32]$ImportId] : $null
+    }
+  }
+  $Program.ExternalFunctionIndex = $ExternalFunctions
+  return $ExternalFunctions
+}
+
+function Get-CreateInstallOperationProfile {
+  <#
+  .SYNOPSIS
+    Return one data-driven CreateInstall operation profile.
+  .PARAMETER Id
+    Stable route identifier from CreateInstallFormatCatalog.psd1.
+  #>
+  [OutputType([hashtable])]
+  param ([Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Id)
+
+  $Profiles = @($Script:CreateInstallFormatCatalog.OperationProfiles | Where-Object Id -CEQ $Id)
+  if ($Profiles.Count -ne 1) { throw "The CreateInstall operation profile '$Id' is missing or duplicated" }
+  return $Profiles[0]
+}
+
+function Find-CreateInstallOperationRoutine {
+  <#
+  .SYNOPSIS
+    Find compiled routines that satisfy one cataloged structural profile.
+  .PARAMETER Program
+    Decoded GE program returned by Get-CreateInstallGenteeProgram.
+  .PARAMETER ProfileId
+    Stable operation profile whose parameter, literal, and imported-call constraints are applied.
+  #>
+  [OutputType([pscustomobject[]])]
+  param (
+    [Parameter(Mandatory)][psobject]$Program,
+    [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$ProfileId
+  )
+
+  $OperationProfile = Get-CreateInstallOperationProfile -Id $ProfileId
+  $Functions = Get-CreateInstallFunctionIndex -Program $Program
+  return [object[]]@($Functions.Values | Where-Object {
+      $Function = $_
+      if ($OperationProfile.ContainsKey('RuntimeParameterCount') -and $Function.ParameterCount -ne [uint32]$OperationProfile.RuntimeParameterCount) { return $false }
+      $StringLiterals = if ($Function.PSObject.Properties['StringLiterals']) { [string[]]$Function.StringLiterals } else { [string[]]@() }
+      if ($OperationProfile.ContainsKey('RequiredLiteralFragments')) {
+        foreach ($Fragment in [string[]]$OperationProfile.RequiredLiteralFragments) {
+          if (@($StringLiterals | Where-Object { $_.Contains($Fragment, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 0) { return $false }
+        }
+      }
+      $ExternalNames = if ($Function.PSObject.Properties['ExternalCalls']) { [string[]]@($Function.ExternalCalls.Name) } else { [string[]]@() }
+      if ($OperationProfile.ContainsKey('RequiredExternalCalls')) { foreach ($Name in [string[]]$OperationProfile.RequiredExternalCalls) { if ($ExternalNames -inotcontains $Name) { return $false } } }
+      if ($OperationProfile.ContainsKey('ForbiddenExternalCalls')) { foreach ($Name in [string[]]$OperationProfile.ForbiddenExternalCalls) { if ($ExternalNames -icontains $Name) { return $false } } }
+      return $true
+    })
+}
+
+function Get-CreateInstallRoutineCallSite {
+  <#
+  .SYNOPSIS
+    Enumerate bounded caller windows ending at calls to selected compiled routines.
+  .PARAMETER Program
+    Decoded GE program whose function index supplies callers and targets.
+  .PARAMETER TargetId
+    Compiled routine object identifiers accepted as operation targets.
+  .PARAMETER MaximumLookback
+    Maximum number of decoded commands retained before each call. The window also starts after the
+    preceding call to the same target, preventing one repeated operation from consuming another.
+  #>
+  [OutputType([pscustomobject[]])]
+  param (
+    [Parameter(Mandatory)][psobject]$Program,
+    [Parameter(Mandatory)][AllowEmptyCollection()][uint32[]]$TargetId,
+    [ValidateRange(1, 1024)][int]$MaximumLookback = 192
+  )
+
+  if ($TargetId.Count -eq 0) { return @() }
+  $Targets = [Collections.Generic.HashSet[uint32]]::new($TargetId)
+  $Calls = [Collections.Generic.List[object]]::new()
+  foreach ($Function in (Get-CreateInstallFunctionIndex -Program $Program).Values) {
+    $PreviousCall = @{}
+    for ($CommandIndex = 0; $CommandIndex -lt $Function.Commands.Count; $CommandIndex++) {
+      $RoutineId = [uint32]$Function.Commands[$CommandIndex].Command
+      if (-not $Targets.Contains($RoutineId)) { continue }
+      $Start = [Math]::Max(0, $CommandIndex - $MaximumLookback)
+      if ($PreviousCall.ContainsKey($RoutineId)) { $Start = [Math]::Max($Start, [int]$PreviousCall[$RoutineId] + 1) }
+      $PreviousCall[$RoutineId] = $CommandIndex
+      $Window = if ($Start -lt $CommandIndex) { [object[]]@($Function.Commands[$Start..($CommandIndex - 1)]) } else { [object[]]@() }
+      $Calls.Add([pscustomobject]@{ CallerId = [uint32]$Function.Record.Id; RoutineId = $RoutineId; CallOffset = [int]$Function.Commands[$CommandIndex].Offset; Window = $Window })
+    }
+  }
+  return $Calls.ToArray()
+}
+
+function Get-CreateInstallScheduledTaskEvidence {
+  <#
+  .SYNOPSIS
+    Recover source-backed CreateInstall scheduled-task creation and deletion operations.
+  .PARAMETER Program
+    Decoded GE program whose imported citools.dll calls identify the task routines.
+  .PARAMETER ProjectVariableEvidence
+    MAINVAR variables used to resolve task fields and conditions.
+  .PARAMETER Is32Bit
+    Indicates the Windows folder view used while resolving CreateInstall macros.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][psobject]$Program,
+    [Parameter(Mandatory)][psobject]$ProjectVariableEvidence,
+    [Parameter(Mandatory)][bool]$Is32Bit
+  )
+
+  $Tasks = [Collections.Generic.List[object]]::new()
+  $Diagnostics = [Collections.Generic.List[object]]::new()
+  $CreateTargets = [uint32[]]@(Find-CreateInstallOperationRoutine -Program $Program -ProfileId ScheduledTaskCreate13 | ForEach-Object { [uint32]$_.Record.Id })
+  foreach ($Call in @(Get-CreateInstallRoutineCallSite -Program $Program -TargetId $CreateTargets)) {
+    $Strings = @($Call.Window | Where-Object Command -EQ 34 | Select-Object -Last 12)
+    $Integers = @($Call.Window | Where-Object { $_.Command -in @(25, 26, 27) -and $_.Operand -is [ValueType] } | Select-Object -Last 1)
+    if ($Strings.Count -ne 12 -or $Integers.Count -ne 1) { continue }
+    $TriggerValue = [uint32]$Integers[0].Operand
+    $TriggerNames = @{ 0 = 'Once'; 1 = 'Daily'; 2 = 'Weekly'; 6 = 'SystemStart'; 7 = 'Logon' }
+    if (-not $TriggerNames.ContainsKey([int]$TriggerValue)) { continue }
+    $ConditionExpression = [string]$Strings[11].Operand
+    $Condition = Resolve-CreateInstallCondition -Expression $ConditionExpression -Variables $ProjectVariableEvidence.Variables
+    if ($Condition -eq $false) { continue }
+    $Executable = Join-CreateInstallMacroPath -Parent ([string]$Strings[2].Operand) -Child ([string]$Strings[3].Operand) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit
+    $WorkingDirectory = Join-CreateInstallMacroPath -Parent ([string]$Strings[5].Operand) -Child ([string]$Strings[6].Operand) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit
+    $Resolved = foreach ($Index in 0, 1, 4, 7, 8, 9, 10) { Resolve-CreateInstallMacroValue -Value ([string]$Strings[$Index].Operand) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit }
+    $Tasks.Add([pscustomobject][ordered]@{
+        Operation = 'Create'; CallerId = $Call.CallerId; RoutineId = $Call.RoutineId; CallOffset = $Call.CallOffset
+        UserName = $Resolved[0].Value; Name = $Resolved[1].Value; Executable = $Executable.Value; Arguments = $Resolved[2].Value
+        WorkingDirectory = $WorkingDirectory.Value; Comment = $Resolved[3].Value; TriggerType = $TriggerNames[[int]$TriggerValue]
+        Start = $Resolved[4].Value; Interval = $Resolved[5].Value; Parameters = $Resolved[6].Value
+        ConditionExpression = $ConditionExpression; Condition = $Condition
+        UnresolvedMacros = [string[]]@($Executable.UnresolvedMacros + $WorkingDirectory.UnresolvedMacros + @($Resolved.UnresolvedMacros) | Sort-Object -Unique)
+      })
+  }
+
+  $DeleteTargets = [uint32[]]@(Find-CreateInstallOperationRoutine -Program $Program -ProfileId ScheduledTaskDelete2 | ForEach-Object { [uint32]$_.Record.Id })
+  foreach ($Call in @(Get-CreateInstallRoutineCallSite -Program $Program -TargetId $DeleteTargets -MaximumLookback 48)) {
+    $Strings = @($Call.Window | Where-Object Command -EQ 34 | Select-Object -Last 2)
+    if ($Strings.Count -ne 2) { continue }
+    $ConditionExpression = [string]$Strings[1].Operand
+    $Condition = Resolve-CreateInstallCondition -Expression $ConditionExpression -Variables $ProjectVariableEvidence.Variables
+    if ($Condition -eq $false) { continue }
+    $Name = Resolve-CreateInstallMacroValue -Value ([string]$Strings[0].Operand) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit
+    if ([string]::IsNullOrWhiteSpace([string]$Name.Value)) { continue }
+    $Tasks.Add([pscustomobject][ordered]@{
+        Operation = 'Delete'; CallerId = $Call.CallerId; RoutineId = $Call.RoutineId; CallOffset = $Call.CallOffset
+        UserName = $null; Name = $Name.Value; Executable = $null; Arguments = $null; WorkingDirectory = $null; Comment = $null
+        TriggerType = $null; Start = $null; Interval = $null; Parameters = $null
+        ConditionExpression = $ConditionExpression; Condition = $Condition; UnresolvedMacros = [string[]]$Name.UnresolvedMacros
+      })
+  }
+
+  $Conditional = @($Tasks | Where-Object { $null -eq $_.Condition -or $_.UnresolvedMacros.Count -gt 0 })
+  if ($Conditional.Count) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.ScheduledTask.Conditional' -Source CreateInstall -Message "$($Conditional.Count) CreateInstall scheduled-task operation(s) depend on runtime conditions or macros." -Kind Ambiguous -Areas Metadata, Installability -Evidence $Conditional)) }
+  return [pscustomobject]@{ ScheduledTasks = $Tasks.ToArray(); Diagnostics = $Diagnostics.ToArray() }
+}
+
+function Get-CreateInstallFileOperationEvidence {
+  <#
+  .SYNOPSIS
+    Recover deterministic direct and list-based CreateInstall file-copy operations.
+  .PARAMETER Program
+    Decoded GE program containing generated copy call sites.
+  .PARAMETER ProjectVariableEvidence
+    MAINVAR variables and g_list bytes used to resolve paths and list rows.
+  .PARAMETER Is32Bit
+    Indicates the Windows folder view used while resolving CreateInstall macros.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][psobject]$Program,
+    [Parameter(Mandatory)][psobject]$ProjectVariableEvidence,
+    [Parameter(Mandatory)][bool]$Is32Bit
+  )
+
+  $Operations = [Collections.Generic.List[object]]::new()
+  $Diagnostics = [Collections.Generic.List[object]]::new()
+  $DirectTargets = [uint32[]]@(Find-CreateInstallOperationRoutine -Program $Program -ProfileId CopyDirect7 | ForEach-Object { [uint32]$_.Record.Id })
+  foreach ($Call in @(Get-CreateInstallRoutineCallSite -Program $Program -TargetId $DirectTargets -MaximumLookback 96)) {
+    $Strings = @($Call.Window | Where-Object Command -EQ 34 | Select-Object -Last 5)
+    $Integers = @($Call.Window | Where-Object { $_.Command -in @(25, 26, 27) -and $_.Operand -is [ValueType] } | Select-Object -Last 2)
+    if ($Strings.Count -ne 5 -or $Integers.Count -ne 2) { continue }
+    $ConditionExpression = [string]$Strings[4].Operand
+    $Condition = Resolve-CreateInstallCondition -Expression $ConditionExpression -Variables $ProjectVariableEvidence.Variables
+    if ($Condition -eq $false) { continue }
+    $Source = Join-CreateInstallMacroPath -Parent ([string]$Strings[0].Operand) -Child ([string]$Strings[1].Operand) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit
+    $Destination = Join-CreateInstallMacroPath -Parent ([string]$Strings[2].Operand) -Child ([string]$Strings[3].Operand) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit
+    $Operations.Add([pscustomobject][ordered]@{
+        Operation = 'Copy'; Route = 'Direct'; CallerId = $Call.CallerId; RoutineId = $Call.RoutineId; CallOffset = $Call.CallOffset; ListOffset = $null; RowIndex = $null
+        Source = $Source.Value; Destination = $Destination.Value; SearchFlags = [uint32]$Integers[0].Operand; OverwriteMode = [uint32]$Integers[1].Operand
+        ConditionExpression = $ConditionExpression; Condition = $Condition; UnresolvedMacros = [string[]]@($Source.UnresolvedMacros + $Destination.UnresolvedMacros | Sort-Object -Unique)
+      })
+  }
+
+  $ListTargets = [uint32[]]@(Find-CreateInstallOperationRoutine -Program $Program -ProfileId CopyList7 | ForEach-Object { [uint32]$_.Record.Id })
+  foreach ($Call in @(Get-CreateInstallListCallEvidence -Program $Program -ProjectVariableEvidence $ProjectVariableEvidence -TargetId $ListTargets -FieldCount 7)) {
+    foreach ($Row in $Call.Rows) {
+      $ConditionExpression = [string]$Row.Fields[5]
+      $Condition = Resolve-CreateInstallCondition -Expression $ConditionExpression -Variables $ProjectVariableEvidence.Variables
+      if ($Condition -eq $false) { continue }
+      $Source = Join-CreateInstallMacroPath -Parent ([string]$Row.Fields[0]) -Child ([string]$Row.Fields[1]) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit
+      $Destination = Join-CreateInstallMacroPath -Parent ([string]$Row.Fields[2]) -Child ([string]$Row.Fields[3]) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit
+      $Operations.Add([pscustomobject][ordered]@{
+          Operation = 'Copy'; Route = 'List'; CallerId = $Call.CallerId; RoutineId = $Call.RoutineId; CallOffset = $Call.CallOffset; ListOffset = $Call.ListOffset; RowIndex = $Row.Index
+          Source = $Source.Value; Destination = $Destination.Value; SearchFlags = $null; OverwriteMode = ([string]$Row.Fields[4] -notin '', '0', 'false') ? 1 : 0
+          ConditionExpression = $ConditionExpression; Condition = $Condition; UnresolvedMacros = [string[]]@($Source.UnresolvedMacros + $Destination.UnresolvedMacros | Sort-Object -Unique)
+        })
+    }
+  }
+  $Conditional = @($Operations | Where-Object { $null -eq $_.Condition -or $_.UnresolvedMacros.Count -gt 0 })
+  if ($Conditional.Count) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.Copy.Conditional' -Source CreateInstall -Message "$($Conditional.Count) CreateInstall file-copy operation(s) depend on runtime conditions or macros." -Kind Ambiguous -Areas Extraction -Evidence $Conditional)) }
+  return [pscustomobject]@{ FileOperations = $Operations.ToArray(); Diagnostics = $Diagnostics.ToArray() }
+}
+
+function Get-CreateInstallDownloadEvidence {
+  <#
+  .SYNOPSIS
+    Recover external files downloaded by source-backed CreateInstall download lists.
+  .PARAMETER Program
+    Decoded GE program containing the downloadfilesex routine and generated calls.
+  .PARAMETER ProjectVariableEvidence
+    MAINVAR variables and g_list bytes used to resolve URLs, destinations, and conditions.
+  .PARAMETER Is32Bit
+    Indicates the Windows folder view used while resolving CreateInstall macros.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][psobject]$Program,
+    [Parameter(Mandatory)][psobject]$ProjectVariableEvidence,
+    [Parameter(Mandatory)][bool]$Is32Bit
+  )
+
+  $Downloads = [Collections.Generic.List[object]]::new()
+  $Diagnostics = [Collections.Generic.List[object]]::new()
+  $Targets = [uint32[]]@(Find-CreateInstallOperationRoutine -Program $Program -ProfileId DownloadList8 | ForEach-Object { [uint32]$_.Record.Id })
+  foreach ($Call in @(Get-CreateInstallRoutineCallSite -Program $Program -TargetId $Targets -MaximumLookback 64)) {
+    $Strings = @($Call.Window | Where-Object Command -EQ 34 | Select-Object -Last 1)
+    $Integers = @($Call.Window | Where-Object { $_.Command -in @(25, 26, 27) -and $_.Operand -is [ValueType] } | Select-Object -Last 2)
+    if ($Strings.Count -ne 1 -or $Integers.Count -ne 2 -or [uint32]$Integers[1].Operand -notin 0, 1) { continue }
+    $ListOffset = [uint32]$Integers[0].Operand
+    try { $Rows = @(ConvertFrom-CreateInstallGenteeList -Bytes $ProjectVariableEvidence.BufferData -Offset ([int]$ListOffset) -FieldCount 8) } catch { continue }
+    $BaseUrl = Resolve-CreateInstallMacroValue -Value ([string]$Strings[0].Operand) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit
+    foreach ($Row in $Rows) {
+      $ConditionExpression = [string]$Row.Fields[5]
+      $Condition = Resolve-CreateInstallCondition -Expression $ConditionExpression -Variables $ProjectVariableEvidence.Variables
+      if ($Condition -eq $false) { continue }
+      $UrlPart = Resolve-CreateInstallMacroValue -Value ([string]$Row.Fields[0]) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit
+      $Url = [string]$UrlPart.Value
+      if ($Url -notmatch '^https?://') { $Url = ([string]$BaseUrl.Value).TrimEnd('/') + '/' + $Url.TrimStart('/') }
+      $FileName = [string]$Row.Fields[3]
+      if ([string]::IsNullOrWhiteSpace($FileName)) {
+        $FileName = ($Url -split '/')[-1] -replace '[?:\\]', '_'
+      }
+      $DestinationDirectory = Join-CreateInstallMacroPath -Parent ([string]$Row.Fields[1]) -Child ([string]$Row.Fields[2]) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit
+      $Destination = Join-CreateInstallMacroPath -Parent ([string]$DestinationDirectory.Value) -Child $FileName -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit
+      $OverwriteValue = 0; [void][int]::TryParse([string]$Row.Fields[4], [ref]$OverwriteValue)
+      $Downloads.Add([pscustomobject][ordered]@{
+          CallerId = $Call.CallerId; RoutineId = $Call.RoutineId; CallOffset = $Call.CallOffset; ListOffset = $ListOffset; RowIndex = $Row.Index
+          Url = $Url; Destination = $Destination.Value; OverwriteMode = @('Overwrite', 'OverwriteDifferentSize', 'Skip')[[Math]::Min([Math]::Max($OverwriteValue, 0), 2)]
+          ResultVariable = [string]$Row.Fields[6]; UsesTlsSupport = [uint32]$Integers[1].Operand -eq 1
+          ConditionExpression = $ConditionExpression; Condition = $Condition
+          UnresolvedMacros = [string[]]@($BaseUrl.UnresolvedMacros + $UrlPart.UnresolvedMacros + $Destination.UnresolvedMacros | Sort-Object -Unique)
+        })
+    }
+  }
+  if ($Downloads.Count) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.Download.ExternalPayload' -Source CreateInstall -Message "CreateInstall downloads $($Downloads.Count) external payload file(s); packaged extraction alone is incomplete." -Kind ManualValidation -Areas Extraction, Installability, Security -Evidence $Downloads.ToArray())) }
+  return [pscustomobject]@{ Downloads = $Downloads.ToArray(); Diagnostics = $Diagnostics.ToArray() }
+}
+
+function Get-CreateInstallArchiveOperationEvidence {
+  <#
+  .SYNOPSIS
+    Recover source-backed 7z, cabinet, and ZIP decompression operations.
+  .PARAMETER Program
+    Decoded GE program containing archive routines and generated call sites.
+  .PARAMETER ProjectVariableEvidence
+    MAINVAR variables used to resolve paths and conditions.
+  .PARAMETER Is32Bit
+    Indicates the Windows folder view used while resolving CreateInstall macros.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][psobject]$Program,
+    [Parameter(Mandatory)][psobject]$ProjectVariableEvidence,
+    [Parameter(Mandatory)][bool]$Is32Bit
+  )
+
+  $Operations = [Collections.Generic.List[object]]::new()
+  $Diagnostics = [Collections.Generic.List[object]]::new()
+  $Routes = @(
+    [pscustomobject]@{ Profile = 'Decompress7z8'; Format = '7z'; StringCount = 7; ConditionIndex = 4; WildcardIndex = 5; ExcludeIndex = 6; IntegerCount = 1 }
+    [pscustomobject]@{ Profile = 'DecompressCab7'; Format = 'Cabinet'; StringCount = 6; ConditionIndex = 4; WildcardIndex = 5; ExcludeIndex = -1; IntegerCount = 1 }
+    [pscustomobject]@{ Profile = 'DecompressZip6'; Format = 'ZIP'; StringCount = 5; ConditionIndex = 4; WildcardIndex = -1; ExcludeIndex = -1; IntegerCount = 1 }
+  )
+  foreach ($Route in $Routes) {
+    $Targets = [uint32[]]@(Find-CreateInstallOperationRoutine -Program $Program -ProfileId $Route.Profile | ForEach-Object { [uint32]$_.Record.Id })
+    foreach ($Call in @(Get-CreateInstallRoutineCallSite -Program $Program -TargetId $Targets -MaximumLookback 96)) {
+      $Strings = @($Call.Window | Where-Object Command -EQ 34 | Select-Object -Last $Route.StringCount)
+      $Integers = @($Call.Window | Where-Object { $_.Command -in @(25, 26, 27) -and $_.Operand -is [ValueType] } | Select-Object -Last $Route.IntegerCount)
+      if ($Strings.Count -ne $Route.StringCount -or $Integers.Count -ne $Route.IntegerCount) { continue }
+      $ConditionExpression = [string]$Strings[$Route.ConditionIndex].Operand
+      $Condition = Resolve-CreateInstallCondition -Expression $ConditionExpression -Variables $ProjectVariableEvidence.Variables
+      if ($Condition -eq $false) { continue }
+      $Source = Join-CreateInstallMacroPath -Parent ([string]$Strings[0].Operand) -Child ([string]$Strings[1].Operand) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit
+      $Destination = Join-CreateInstallMacroPath -Parent ([string]$Strings[2].Operand) -Child ([string]$Strings[3].Operand) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit
+      $Operations.Add([pscustomobject][ordered]@{
+          Operation = 'Decompress'; Format = $Route.Format; CallerId = $Call.CallerId; RoutineId = $Call.RoutineId; CallOffset = $Call.CallOffset
+          Source = $Source.Value; Destination = $Destination.Value
+          OverwriteOrFlags = [uint32]$Integers[0].Operand
+          IncludeWildcard = $Route.WildcardIndex -ge 0 ? [string]$Strings[$Route.WildcardIndex].Operand : $null
+          ExcludeWildcard = $Route.ExcludeIndex -ge 0 ? [string]$Strings[$Route.ExcludeIndex].Operand : $null
+          ConditionExpression = $ConditionExpression; Condition = $Condition
+          UnresolvedMacros = [string[]]@($Source.UnresolvedMacros + $Destination.UnresolvedMacros | Sort-Object -Unique)
+        })
+    }
+  }
+  $Conditional = @($Operations | Where-Object { $null -eq $_.Condition -or $_.UnresolvedMacros.Count -gt 0 })
+  if ($Conditional.Count) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.ArchiveOperation.Conditional' -Source CreateInstall -Message "$($Conditional.Count) CreateInstall nested-archive operation(s) depend on runtime conditions or macros." -Kind Ambiguous -Areas Extraction -Evidence $Conditional)) }
+  if ($Operations.Count) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.ArchiveOperation.NestedPayload' -Source CreateInstall -Message "CreateInstall expands $($Operations.Count) nested archive(s); their contents are not part of the outer GEA catalog." -Kind Information -Areas Extraction -Evidence $Operations.ToArray())) }
+  return [pscustomobject]@{ ArchiveOperations = $Operations.ToArray(); Diagnostics = $Diagnostics.ToArray() }
+}
+
+function Get-CreateInstallConfigurationEvidence {
+  <#
+  .SYNOPSIS
+    Recover source-backed CreateInstall INI value writes and deletions.
+  .PARAMETER Program
+    Decoded GE program whose imported profile APIs distinguish INI operation routes.
+  .PARAMETER ProjectVariableEvidence
+    MAINVAR variables and g_list bytes used to resolve paths, values, and conditions.
+  .PARAMETER Is32Bit
+    Indicates the Windows folder view used while resolving CreateInstall macros.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][psobject]$Program,
+    [Parameter(Mandatory)][psobject]$ProjectVariableEvidence,
+    [Parameter(Mandatory)][bool]$Is32Bit
+  )
+
+  $Changes = [Collections.Generic.List[object]]::new()
+  $Diagnostics = [Collections.Generic.List[object]]::new()
+  foreach ($Route in @(
+      [pscustomobject]@{ Profile = 'IniSet6'; Operation = 'Set'; FieldCount = 5; ConditionIndex = 2; ValueIndex = 1 }
+      [pscustomobject]@{ Profile = 'IniDelete6'; Operation = 'Delete'; FieldCount = 3; ConditionIndex = 1; ValueIndex = -1 }
+    )) {
+    $Targets = [uint32[]]@(Find-CreateInstallOperationRoutine -Program $Program -ProfileId $Route.Profile | ForEach-Object { [uint32]$_.Record.Id })
+    foreach ($Call in @(Get-CreateInstallRoutineCallSite -Program $Program -TargetId $Targets -MaximumLookback 96)) {
+      $Strings = @($Call.Window | Where-Object Command -EQ 34 | Select-Object -Last 3)
+      $Integers = @($Call.Window | Where-Object { $_.Command -in @(25, 26, 27) -and $_.Operand -is [ValueType] } | Select-Object -Last 3)
+      if ($Strings.Count -ne 3 -or $Integers.Count -ne 3 -or [uint32]$Integers[1].Operand -notin 0, 1 -or [uint32]$Integers[2].Operand -notin 0, 1) { continue }
+      $ListOffset = [uint32]$Integers[0].Operand
+      try { $Rows = @(ConvertFrom-CreateInstallGenteeList -Bytes $ProjectVariableEvidence.BufferData -Offset ([int]$ListOffset) -FieldCount $Route.FieldCount) } catch { continue }
+      $FilePath = Join-CreateInstallMacroPath -Parent ([string]$Strings[0].Operand) -Child ([string]$Strings[1].Operand) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit
+      $Section = Resolve-CreateInstallMacroValue -Value ([string]$Strings[2].Operand) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit
+      foreach ($Row in $Rows) {
+        $ConditionExpression = [string]$Row.Fields[$Route.ConditionIndex]
+        $Condition = Resolve-CreateInstallCondition -Expression $ConditionExpression -Variables $ProjectVariableEvidence.Variables
+        if ($Condition -eq $false) { continue }
+        $Key = Resolve-CreateInstallMacroValue -Value ([string]$Row.Fields[0]) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit
+        $Value = $Route.ValueIndex -ge 0 ? (Resolve-CreateInstallMacroValue -Value ([string]$Row.Fields[$Route.ValueIndex]) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit) : $null
+        $Changes.Add([pscustomobject][ordered]@{
+            Operation = $Route.Operation; CallerId = $Call.CallerId; RoutineId = $Call.RoutineId; CallOffset = $Call.CallOffset; ListOffset = $ListOffset; RowIndex = $Row.Index
+            FilePath = $FilePath.Value; Section = $Section.Value; Key = $Key.Value; Value = $null -ne $Value ? $Value.Value : $null
+            Utf = [uint32]$Integers[1].Operand -eq 1; WriteBom = [uint32]$Integers[2].Operand -eq 1
+            ConditionExpression = $ConditionExpression; Condition = $Condition
+            UnresolvedMacros = [string[]]@($FilePath.UnresolvedMacros + $Section.UnresolvedMacros + $Key.UnresolvedMacros + $(if ($null -ne $Value) { $Value.UnresolvedMacros } else { @() }) | Sort-Object -Unique)
+          })
+      }
+    }
+  }
+  $Conditional = @($Changes | Where-Object { $null -eq $_.Condition -or $_.UnresolvedMacros.Count -gt 0 })
+  if ($Conditional.Count) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.Configuration.Conditional' -Source CreateInstall -Message "$($Conditional.Count) CreateInstall INI operation(s) depend on runtime conditions or macros." -Kind Ambiguous -Areas Metadata -Evidence $Conditional)) }
+  return [pscustomobject]@{ ConfigurationChanges = $Changes.ToArray(); Diagnostics = $Diagnostics.ToArray() }
+}
+
+function Get-CreateInstallListCallEvidence {
+  <#
+  .SYNOPSIS
+    Decode source-backed g_list rows passed to one-parameter CreateInstall runtime routines.
+  .PARAMETER Program
+    Decoded GE program whose cached function index contains the target and caller commands.
+  .PARAMETER ProjectVariableEvidence
+    MAINVAR evidence containing the initialized g_list byte buffer.
+  .PARAMETER TargetId
+    Object identifiers of structurally identified one-parameter list routines.
+  .PARAMETER FieldCount
+    Number of NUL-terminated fields in each source-defined list row.
+  #>
+  [OutputType([pscustomobject[]])]
+  param (
+    [Parameter(Mandatory)][psobject]$Program,
+    [Parameter(Mandatory)][psobject]$ProjectVariableEvidence,
+    [Parameter(Mandatory)][AllowEmptyCollection()][uint32[]]$TargetId,
+    [Parameter(Mandatory)][ValidateRange(1, 64)][int]$FieldCount
+  )
+
+  if ($TargetId.Count -eq 0) { return @() }
+  $Targets = [Collections.Generic.HashSet[uint32]]::new($TargetId)
+  $Calls = [Collections.Generic.List[object]]::new()
+  foreach ($Function in (Get-CreateInstallFunctionIndex -Program $Program).Values) {
+    $Commands = $Function.Commands
+    for ($CommandIndex = 1; $CommandIndex -lt $Commands.Count; $CommandIndex++) {
+      $RoutineId = [uint32]$Commands[$CommandIndex].Command
+      if (-not $Targets.Contains($RoutineId)) { continue }
+
+      # A generated list command passes one integer offset. Limit the backwards search to the
+      # current expression and require the nearest integer literal to decode as the expected list.
+      $Start = [Math]::Max(0, $CommandIndex - 16)
+      $OffsetCommands = @($Commands[$Start..($CommandIndex - 1)] | Where-Object { $_.Command -in @(25, 26, 27) -and $_.Operand -is [ValueType] })
+      if ($OffsetCommands.Count -eq 0) { continue }
+      $ListOffset = [uint32]$OffsetCommands[-1].Operand
+      try { $Rows = @(ConvertFrom-CreateInstallGenteeList -Bytes $ProjectVariableEvidence.BufferData -Offset ([int]$ListOffset) -FieldCount $FieldCount) } catch { continue }
+      $Calls.Add([pscustomobject]@{
+          CallerId   = [uint32]$Function.Record.Id
+          RoutineId  = $RoutineId
+          CallOffset = [int]$Commands[$CommandIndex].Offset
+          ListOffset = $ListOffset
+          Rows       = $Rows
+        })
+    }
+  }
+  return $Calls.ToArray()
+}
+
+function Get-CreateInstallEnvironmentEvidence {
+  <#
+  .SYNOPSIS
+    Recover deterministic CreateInstall environment-variable set and ambiguous append/delete operations.
+  .PARAMETER Program
+    Decoded GE program returned by Get-CreateInstallGenteeProgram.
+  .PARAMETER ProjectVariableEvidence
+    MAINVAR variables and g_list bytes used to resolve values and list records.
+  .PARAMETER Is32Bit
+    Indicates the Windows folder view used while resolving CreateInstall macros.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][psobject]$Program,
+    [Parameter(Mandatory)][psobject]$ProjectVariableEvidence,
+    [Parameter(Mandatory)][bool]$Is32Bit
+  )
+
+  $Functions = Get-CreateInstallFunctionIndex -Program $Program
+  # globsets writes a list of complete values. The four-parameter globappend and globdel routines
+  # retain the same Environment/g_append fingerprints, so static evidence must not claim which
+  # mutation occurs unless a future source-backed bytecode fingerprint separates them.
+  $SetTargets = [uint32[]]@($Functions.Values | Where-Object {
+      $_.ParameterCount -eq 1 -and $_.LiteralText.Contains('Environment', [StringComparison]::Ordinal) -and -not $_.LiteralText.Contains('g_append', [StringComparison]::Ordinal)
+    } | ForEach-Object { [uint32]$_.Record.Id })
+  $AppendTargets = [Collections.Generic.HashSet[uint32]]::new([uint32[]]@($Functions.Values | Where-Object {
+        $_.ParameterCount -eq 4 -and $_.LiteralText.Contains('Environment', [StringComparison]::Ordinal) -and $_.LiteralText.Contains('g_append', [StringComparison]::Ordinal)
+      } | ForEach-Object { [uint32]$_.Record.Id }))
+  if ($SetTargets.Count -eq 0 -and $AppendTargets.Count -eq 0) { return [pscustomobject]@{ EnvironmentChanges = @(); Diagnostics = @() } }
+  $Changes = [Collections.Generic.List[object]]::new()
+  $Diagnostics = [Collections.Generic.List[object]]::new()
+
+  $AddChange = {
+    param([string]$Operation, [uint32]$CallerId, [uint32]$RoutineId, [int]$CallOffset, [AllowNull()][uint32]$ListOffset, [AllowNull()][int]$RowIndex, [string]$NameExpression, [string]$ValueExpression, [int]$Type, [bool]$OperationIs32Bit, [string]$ConditionExpression)
+    $Condition = Resolve-CreateInstallCondition -Expression $ConditionExpression -Variables $ProjectVariableEvidence.Variables
+    if ($Condition -eq $false) { return }
+    $Name = Resolve-CreateInstallMacroValue -Value $NameExpression -Variables $ProjectVariableEvidence.Variables -Is32Bit $OperationIs32Bit
+    $Value = Resolve-CreateInstallMacroValue -Value $ValueExpression -Variables $ProjectVariableEvidence.Variables -Is32Bit $OperationIs32Bit
+    $EffectiveType = [Math]::Max(1, $Type)
+    $Scopes = [Collections.Generic.List[string]]::new(2)
+    if (($EffectiveType -band 1) -ne 0) { $Scopes.Add('machine') }
+    if (($EffectiveType -band 2) -ne 0) { $Scopes.Add('user') }
+    $Changes.Add([pscustomobject][ordered]@{
+        Operation = $Operation; CallerId = $CallerId; RoutineId = $RoutineId; CallOffset = $CallOffset
+        ListOffset = $ListOffset; RowIndex = $RowIndex; Name = $Name.Value; Value = $Value.Value
+        Scope = $Scopes.Count -eq 2 ? 'both' : ($Scopes.Count -eq 1 ? $Scopes[0] : $null); Scopes = $Scopes.ToArray()
+        ConditionExpression = $ConditionExpression; Condition = $Condition
+        UnresolvedMacros = [string[]]@($Name.UnresolvedMacros + $Value.UnresolvedMacros | Sort-Object -Unique)
+      })
+  }
+
+  foreach ($Call in @(Get-CreateInstallListCallEvidence -Program $Program -ProjectVariableEvidence $ProjectVariableEvidence -TargetId $SetTargets -FieldCount 5)) {
+    foreach ($Row in $Call.Rows) {
+      $Type = 0; [void][int]::TryParse([string]$Row.Fields[2], [ref]$Type)
+      & $AddChange 'Set' $Call.CallerId $Call.RoutineId $Call.CallOffset $Call.ListOffset $Row.Index ([string]$Row.Fields[0]) ([string]$Row.Fields[1]) $Type $Is32Bit ([string]$Row.Fields[3])
+    }
+  }
+
+  if ($AppendTargets.Count -gt 0) {
+    foreach ($Function in $Functions.Values) {
+      $Commands = $Function.Commands
+      for ($CommandIndex = 1; $CommandIndex -lt $Commands.Count; $CommandIndex++) {
+        $RoutineId = [uint32]$Commands[$CommandIndex].Command
+        if (-not $AppendTargets.Contains($RoutineId)) { continue }
+        $Window = @($Commands[[Math]::Max(0, $CommandIndex - 48)..($CommandIndex - 1)])
+        $Strings = @($Window | Where-Object Command -EQ 34 | Select-Object -Last 3)
+        $Integers = @($Window | Where-Object { $_.Command -in @(25, 26, 27) -and $_.Operand -is [ValueType] } | Select-Object -Last 1)
+        if ($Strings.Count -ne 3 -or $Integers.Count -ne 1) { continue }
+        & $AddChange 'AppendOrRemove' ([uint32]$Function.Record.Id) $RoutineId ([int]$Commands[$CommandIndex].Offset) $null $null ([string]$Strings[0].Operand) ([string]$Strings[1].Operand) ([int][uint32]$Integers[0].Operand) $Is32Bit ([string]$Strings[2].Operand)
+      }
+    }
+  }
+
+  $Conditional = @($Changes | Where-Object { $null -eq $_.Condition -or $_.UnresolvedMacros.Count -gt 0 })
+  if ($Conditional.Count) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.Environment.Conditional' -Source CreateInstall -Message "$($Conditional.Count) CreateInstall environment-variable operation(s) depend on runtime conditions or macros." -Kind Ambiguous -Areas Metadata -Evidence $Conditional)) }
+  $AmbiguousMutations = @($Changes | Where-Object Operation -EQ 'AppendOrRemove')
+  if ($AmbiguousMutations.Count) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.Environment.AppendDeleteAmbiguous' -Source CreateInstall -Message "$($AmbiguousMutations.Count) CreateInstall environment-variable mutation(s) may append or remove a value; the compiled routines have the same stable structural signature." -Kind Ambiguous -Areas Metadata -Evidence $AmbiguousMutations)) }
+  return [pscustomobject]@{ EnvironmentChanges = $Changes.ToArray(); Diagnostics = $Diagnostics.ToArray() }
+}
+
+function Get-CreateInstallPrerequisiteEvidence {
+  <#
+  .SYNOPSIS
+    Recover source-backed Visual C++ redistributable checks from compiled CreateInstall commands.
+  .PARAMETER Program
+    Decoded GE program returned by Get-CreateInstallGenteeProgram.
+  .PARAMETER ProjectVariableEvidence
+    MAINVAR variables used to resolve conditions and diagnostic text.
+  .PARAMETER Is32Bit
+    Indicates the Windows folder view used while resolving CreateInstall macros.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][psobject]$Program,
+    [Parameter(Mandatory)][psobject]$ProjectVariableEvidence,
+    [Parameter(Mandatory)][bool]$Is32Bit
+  )
+
+  $Functions = Get-CreateInstallFunctionIndex -Program $Program
+  $Targets = [Collections.Generic.HashSet[uint32]]::new([uint32[]]@($Functions.Values | Where-Object {
+        $_.ParameterCount -eq 6 -and $_.LiteralText.Contains('SOFTWARE\Classes\Installer\Products\', [StringComparison]::OrdinalIgnoreCase) -and $_.LiteralText.Contains('RuntimeMinimum', [StringComparison]::OrdinalIgnoreCase)
+      } | ForEach-Object { [uint32]$_.Record.Id }))
+  if ($Targets.Count -eq 0) { return [pscustomobject]@{ PrerequisiteChecks = @(); Diagnostics = @() } }
+  $Checks = [Collections.Generic.List[object]]::new()
+  $Diagnostics = [Collections.Generic.List[object]]::new()
+  $Years = [string[]]@('2005', '2008', '2010', '2012', '2013', '2015', '2017', '2019')
+
+  foreach ($Function in $Functions.Values) {
+    $Commands = $Function.Commands
+    for ($CommandIndex = 1; $CommandIndex -lt $Commands.Count; $CommandIndex++) {
+      $RoutineId = [uint32]$Commands[$CommandIndex].Command
+      if (-not $Targets.Contains($RoutineId)) { continue }
+      $Strings = @($Commands[[Math]::Max(0, $CommandIndex - 80)..($CommandIndex - 1)] | Where-Object Command -EQ 34 | Select-Object -Last 6)
+      if ($Strings.Count -ne 6) { continue }
+      $Selection = [string]$Strings[1].Operand
+      if ($Selection -notmatch '^[01]{8}$' -or [string]$Strings[0].Operand -notin 'x32', 'x64' -or [string]$Strings[2].Operand -notin 'and', 'or') { continue }
+      $ConditionExpression = [string]$Strings[5].Operand
+      $Condition = Resolve-CreateInstallCondition -Expression $ConditionExpression -Variables $ProjectVariableEvidence.Variables
+      if ($Condition -eq $false) { continue }
+      $SelectedYears = [Collections.Generic.List[string]]::new()
+      for ($Index = 0; $Index -lt $Selection.Length; $Index++) { if ($Selection[$Index] -eq '1') { $SelectedYears.Add($Years[$Index]) } }
+      if ($SelectedYears.Count -eq 0) { continue }
+      $DependencyCandidates = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+      $ArchitectureSuffix = [string]$Strings[0].Operand -eq 'x64' ? 'x64' : 'x86'
+      foreach ($Year in $SelectedYears) {
+        $Identifier = if ([int]$Year -ge 2015) { "Microsoft.VCRedist.2015+.$ArchitectureSuffix" } else { "Microsoft.VCRedist.$Year.$ArchitectureSuffix" }
+        $null = $DependencyCandidates.Add($Identifier)
+      }
+      $Message = Resolve-CreateInstallMacroValue -Value ([string]$Strings[4].Operand) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit
+      $Checks.Add([pscustomobject][ordered]@{
+          Kind = 'VisualCRedistributable'; CallerId = [uint32]$Function.Record.Id; RoutineId = $RoutineId; CallOffset = [int]$Commands[$CommandIndex].Offset
+          Architecture = $ArchitectureSuffix; Versions = $SelectedYears.ToArray(); Combination = [string]$Strings[2].Operand; PackageDependencyCandidates = [string[]]@($DependencyCandidates | Sort-Object)
+          ResultVariable = [string]$Strings[3].Operand; FailureMessage = $Message.Value; MayAbortInstallation = -not [string]::IsNullOrWhiteSpace([string]$Message.Value)
+          ConditionExpression = $ConditionExpression; Condition = $Condition; UnresolvedMacros = [string[]]$Message.UnresolvedMacros
+        })
+    }
+  }
+
+  if ($Checks.Count) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.Prerequisite.VisualCpp' -Source CreateInstall -Message "CreateInstall checks $($Checks.Count) Visual C++ redistributable requirement set(s); these are dependency evidence and may control installation." -Kind ManualValidation -Areas Installability -AffectedFields Dependencies -Evidence $Checks.ToArray())) }
+  return [pscustomobject]@{ PrerequisiteChecks = $Checks.ToArray(); Diagnostics = $Diagnostics.ToArray() }
+}
+
+function Get-CreateInstallServiceEvidence {
+  <#
+  .SYNOPSIS
+    Recover deterministic CreateInstall Windows-service creation calls.
+  .PARAMETER Program
+    Decoded GE program returned by Get-CreateInstallGenteeProgram.
+  .PARAMETER ProjectVariableEvidence
+    MAINVAR variables used to resolve service paths and conditions.
+  .PARAMETER Is32Bit
+    Indicates the Windows folder view used while resolving CreateInstall macros.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][psobject]$Program,
+    [Parameter(Mandatory)][psobject]$ProjectVariableEvidence,
+    [Parameter(Mandatory)][bool]$Is32Bit
+  )
+
+  $Functions = Get-CreateInstallFunctionIndex -Program $Program
+  $CreateCoreIds = [Collections.Generic.HashSet[uint32]]::new([uint32[]]@($Functions.Values | Where-Object {
+        $_.ParameterCount -eq 6 -and $_.LiteralText.Contains('System\CurrentControlSet\Services\', [StringComparison]::OrdinalIgnoreCase)
+      } | ForEach-Object { [uint32]$_.Record.Id }))
+  $Targets = [Collections.Generic.HashSet[uint32]]::new([uint32[]]@($Functions.Values | Where-Object {
+        $_.ParameterCount -eq 7 -and @($_.Commands | Where-Object { $CreateCoreIds.Contains([uint32]$_.Command) }).Count -gt 0
+      } | ForEach-Object { [uint32]$_.Record.Id }))
+  $Services = [Collections.Generic.List[object]]::new()
+  $Diagnostics = [Collections.Generic.List[object]]::new()
+
+  foreach ($Function in $Functions.Values) {
+    $Commands = $Function.Commands
+    for ($CommandIndex = 1; $CommandIndex -lt $Commands.Count; $CommandIndex++) {
+      $RoutineId = [uint32]$Commands[$CommandIndex].Command
+      if (-not $Targets.Contains($RoutineId)) { continue }
+      $Window = @($Commands[[Math]::Max(0, $CommandIndex - 96)..($CommandIndex - 1)])
+      $Strings = @($Window | Where-Object Command -EQ 34 | Select-Object -Last 6)
+      $Integers = @($Window | Where-Object { $_.Command -in @(25, 26, 27) -and $_.Operand -is [ValueType] } | Select-Object -Last 2)
+      if ($Strings.Count -ne 6 -or $Integers.Count -ne 2) { continue }
+      $StartTypeValue = [uint32]$Integers[0].Operand
+      $NoRunValue = [uint32]$Integers[1].Operand
+      if ($StartTypeValue -notin 2, 3, 4 -or $NoRunValue -notin 0, 1) { continue }
+      $ConditionExpression = [string]$Strings[5].Operand
+      $Condition = Resolve-CreateInstallCondition -Expression $ConditionExpression -Variables $ProjectVariableEvidence.Variables
+      if ($Condition -eq $false) { continue }
+      $Path = Join-CreateInstallMacroPath -Parent ([string]$Strings[0].Operand) -Child ([string]$Strings[1].Operand) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit
+      $Name = Resolve-CreateInstallMacroValue -Value ([string]$Strings[2].Operand) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit
+      $DisplayName = Resolve-CreateInstallMacroValue -Value ([string]$Strings[3].Operand) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit
+      $Description = Resolve-CreateInstallMacroValue -Value ([string]$Strings[4].Operand) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit
+      $Services.Add([pscustomobject][ordered]@{
+          Operation = 'Create'; CallerId = [uint32]$Function.Record.Id; RoutineId = $RoutineId; CallOffset = [int]$Commands[$CommandIndex].Offset
+          Name = $Name.Value; DisplayName = $DisplayName.Value; Description = $Description.Value; BinaryPath = $Path.Value
+          ServiceType = 'Win32OwnProcess'; StartType = @('Boot', 'System', 'Automatic', 'Manual', 'Disabled')[$StartTypeValue]
+          StartAfterInstall = $NoRunValue -eq 0; ConditionExpression = $ConditionExpression; Condition = $Condition
+          UnresolvedMacros = [string[]]@($Path.UnresolvedMacros + $Name.UnresolvedMacros + $DisplayName.UnresolvedMacros + $Description.UnresolvedMacros | Sort-Object -Unique)
+        })
+    }
+  }
+
+  # The Start/Stop and Delete project commands are generated inline. Identify their target helpers
+  # by exact service-control API imports, then accept only calls from zero-parameter generated event
+  # functions with the source-defined condition/name literal pair. Calls between runtime helpers are
+  # deliberately excluded because their arguments are computed values rather than project fields.
+  foreach ($Route in @(
+      [pscustomobject]@{ Profile = 'ServiceStart1'; Operation = 'Start' }
+      [pscustomobject]@{ Profile = 'ServiceStop1'; Operation = 'Stop' }
+      [pscustomobject]@{ Profile = 'ServiceDelete1'; Operation = 'Delete' }
+    )) {
+    $ActionTargets = [uint32[]]@(Find-CreateInstallOperationRoutine -Program $Program -ProfileId $Route.Profile | ForEach-Object { [uint32]$_.Record.Id })
+    foreach ($Call in @(Get-CreateInstallRoutineCallSite -Program $Program -TargetId $ActionTargets -MaximumLookback 48)) {
+      if (-not $Functions.ContainsKey([uint32]$Call.CallerId) -or $Functions[[uint32]$Call.CallerId].ParameterCount -ne 0) { continue }
+      $Strings = @($Call.Window | Where-Object Command -EQ 34 | Select-Object -Last 2)
+      if ($Strings.Count -ne 2) { continue }
+      $ConditionExpression = [string]$Strings[0].Operand
+      $Condition = Resolve-CreateInstallCondition -Expression $ConditionExpression -Variables $ProjectVariableEvidence.Variables
+      if ($Condition -eq $false) { continue }
+      $Name = Resolve-CreateInstallMacroValue -Value ([string]$Strings[1].Operand) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit
+      if ([string]::IsNullOrWhiteSpace([string]$Name.Value)) { continue }
+      $Services.Add([pscustomobject][ordered]@{
+          Operation = $Route.Operation; CallerId = $Call.CallerId; RoutineId = $Call.RoutineId; CallOffset = $Call.CallOffset
+          Name = $Name.Value; DisplayName = $null; Description = $null; BinaryPath = $null; ServiceType = $null; StartType = $null; StartAfterInstall = $null
+          ConditionExpression = $ConditionExpression; Condition = $Condition; UnresolvedMacros = [string[]]$Name.UnresolvedMacros
+        })
+    }
+  }
+  $Conditional = @($Services | Where-Object { $null -eq $_.Condition -or $_.UnresolvedMacros.Count -gt 0 })
+  if ($Conditional.Count) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.Service.Conditional' -Source CreateInstall -Message "$($Conditional.Count) CreateInstall service operation(s) depend on runtime conditions or macros." -Kind Ambiguous -Areas Metadata, Installability -Evidence $Conditional)) }
+  return [pscustomobject]@{ Services = $Services.ToArray(); Diagnostics = $Diagnostics.ToArray() }
+}
+
+function Get-CreateInstallRegistrationEvidence {
+  <#
+  .SYNOPSIS
+    Recover CreateInstall font, COM/ActiveX, type-library, and .NET assembly registrations.
+  .PARAMETER Program
+    Decoded GE program returned by Get-CreateInstallGenteeProgram.
+  .PARAMETER ProjectVariableEvidence
+    MAINVAR variables and g_list bytes used to resolve registration rows.
+  .PARAMETER Is32Bit
+    Indicates the Windows folder view used while resolving CreateInstall macros.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][psobject]$Program,
+    [Parameter(Mandatory)][psobject]$ProjectVariableEvidence,
+    [Parameter(Mandatory)][bool]$Is32Bit
+  )
+
+  $Functions = Get-CreateInstallFunctionIndex -Program $Program
+  $RegistrationProfiles = @(
+    [pscustomobject]@{ Kind = 'Font'; Marker = 'CurrentVersion\Fonts'; SecondaryMarker = 'Windows NT'; FieldCount = 6 }
+    [pscustomobject]@{ Kind = 'Com'; Marker = 'regsvr32.exe'; SecondaryMarker = 'isdllok'; FieldCount = 6 }
+    [pscustomobject]@{ Kind = 'DotNetAssembly'; Marker = 'RegAsm.exe'; SecondaryMarker = '/codebase'; FieldCount = 6 }
+  )
+  $Registrations = [Collections.Generic.List[object]]::new()
+  $Diagnostics = [Collections.Generic.List[object]]::new()
+  foreach ($RegistrationProfile in $RegistrationProfiles) {
+    $Targets = [uint32[]]@($Functions.Values | Where-Object {
+        $_.ParameterCount -eq 1 -and $_.LiteralText.Contains($RegistrationProfile.Marker, [StringComparison]::OrdinalIgnoreCase) -and $_.LiteralText.Contains($RegistrationProfile.SecondaryMarker, [StringComparison]::OrdinalIgnoreCase)
+      } | ForEach-Object { [uint32]$_.Record.Id })
+    foreach ($Call in @(Get-CreateInstallListCallEvidence -Program $Program -ProjectVariableEvidence $ProjectVariableEvidence -TargetId $Targets -FieldCount $RegistrationProfile.FieldCount)) {
+      foreach ($Row in $Call.Rows) {
+        $ConditionIndex = $RegistrationProfile.Kind -eq 'Font' ? 4 : ($RegistrationProfile.Kind -eq 'Com' ? 3 : 4)
+        $ConditionExpression = [string]$Row.Fields[$ConditionIndex]
+        $Condition = Resolve-CreateInstallCondition -Expression $ConditionExpression -Variables $ProjectVariableEvidence.Variables
+        if ($Condition -eq $false) { continue }
+        $Path = Join-CreateInstallMacroPath -Parent ([string]$Row.Fields[0]) -Child ([string]$Row.Fields[1]) -Variables $ProjectVariableEvidence.Variables -Is32Bit $Is32Bit
+        $Common = [ordered]@{
+          Kind = $RegistrationProfile.Kind; CallerId = $Call.CallerId; RoutineId = $Call.RoutineId; CallOffset = $Call.CallOffset; ListOffset = $Call.ListOffset; RowIndex = $Row.Index
+          Path = $Path.Value; ConditionExpression = $ConditionExpression; Condition = $Condition; UnresolvedMacros = [string[]]$Path.UnresolvedMacros
+        }
+        if ($RegistrationProfile.Kind -eq 'Font') {
+          $Common['Name'] = [string]::IsNullOrWhiteSpace([string]$Row.Fields[2]) ? [IO.Path]::GetFileNameWithoutExtension([string]$Row.Fields[1]) : [string]$Row.Fields[2]
+          $Common['Permanent'] = [string]$Row.Fields[3] -notin '', '0', 'false'
+        } elseif ($RegistrationProfile.Kind -eq 'Com') {
+          $Common['RegistrationMethod'] = [string]$Row.Fields[2] -notin '', '0', 'false' ? 'RegSvr32' : ([IO.Path]::GetExtension([string]$Path.Value) -ieq '.tlb' ? 'TypeLibrary' : 'InProcess')
+          $Common['ResultVariable'] = [string]$Row.Fields[4]
+        } else {
+          $FrameworkIndex = 0; [void][int]::TryParse([string]$Row.Fields[2], [ref]$FrameworkIndex)
+          $Common['Framework'] = @('', '.NET Framework 2.0/3.0/3.5 x86', '.NET Framework 4.x x86', '.NET Framework 2.0/3.0/3.5 x64', '.NET Framework 4.x x64')[[Math]::Min([Math]::Max($FrameworkIndex, 0), 4)]
+          $Common['Arguments'] = [string]$Row.Fields[3]
+        }
+        $Registrations.Add([pscustomobject]$Common)
+      }
+    }
+  }
+  $Conditional = @($Registrations | Where-Object { $null -eq $_.Condition -or $_.UnresolvedMacros.Count -gt 0 })
+  if ($Conditional.Count) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.Registration.Conditional' -Source CreateInstall -Message "$($Conditional.Count) CreateInstall registration operation(s) depend on runtime conditions or macros." -Kind Ambiguous -Areas Metadata -Evidence $Conditional)) }
+  return [pscustomobject]@{ Registrations = $Registrations.ToArray(); Diagnostics = $Diagnostics.ToArray() }
 }
 
 function Get-CreateInstallGenteeExpressionEvidence {
@@ -1186,11 +1957,15 @@ function Get-CreateInstallInstallFileEvidence {
   )
 
   # Link-time object IDs and function names are unstable. Recover unpackgroup by its five-argument
-  # signature and its call to a three-argument unpackfile routine; unpackgroupex is the six-argument
-  # wrapper that calls that recovered group routine. The generated project may call either route.
+  # signature and calls to both the one-argument condition evaluator and three-argument unpackfile
+  # routine. Requiring both callees excludes unrelated five-argument runtime helpers found in early
+  # media. unpackgroupex is the six-argument wrapper that calls the recovered group routine. The
+  # generated project may call either route.
   $Functions = Get-CreateInstallFunctionIndex -Program $Program
   $GroupRoutines = @($Functions.Values | Where-Object {
-      $_.ParameterCount -eq 5 -and $_.Record.Size -lt 512 -and @($_.Commands | Where-Object { $Functions.ContainsKey([uint32]$_.Command) -and $Functions[[uint32]$_.Command].ParameterCount -eq 3 }).Count -gt 0
+      if ($_.ParameterCount -ne 5 -or $_.Record.Size -ge 512) { return $false }
+      $CalledParameterCounts = @($_.Commands | Where-Object { $Functions.ContainsKey([uint32]$_.Command) } | ForEach-Object { $Functions[[uint32]$_.Command].ParameterCount })
+      return $CalledParameterCounts -contains 1 -and $CalledParameterCounts -contains 3
     })
   $ExtendedRoutines = @($Functions.Values | Where-Object {
       $_.ParameterCount -eq 6 -and @($_.Commands | Where-Object { $Target = [uint32]$_.Command; $GroupRoutines.Record.Id -contains $Target }).Count -gt 0
@@ -1305,20 +2080,20 @@ function Get-CreateInstallRegistryEvidence {
     ([uint32]2147483653) = 'HKCC'
   }
   $TypeNames = @('REG_DWORD', 'REG_SZ', 'REG_BINARY', 'REG_MULTI_SZ', 'REG_EXPAND_SZ')
-  $FunctionParameters = [System.Collections.Generic.Dictionary[uint32, uint32]]::new()
-  foreach ($Record in @($Program.Records | Where-Object Type -EQ 3)) { $FunctionParameters[[uint32]$Record.Id] = Get-CreateInstallGenteeParameterCount -Program $Program -Record $Record }
+  $Functions = Get-CreateInstallFunctionIndex -Program $Program
   $Calls = [System.Collections.Generic.List[object]]::new()
   $Writes = [System.Collections.Generic.List[object]]::new()
   $ConditionalWrites = [System.Collections.Generic.List[object]]::new()
   $DynamicConditions = [System.Collections.Generic.List[object]]::new()
 
-  foreach ($Record in @($Program.Records | Where-Object Type -EQ 3)) {
-    $Commands = @(Get-CreateInstallGenteeCommand -Program $Program -Record $Record)
+  foreach ($Function in $Functions.Values) {
+    $Record = $Function.Record
+    $Commands = $Function.Commands
     $PreviousTargetIndex = @{}
     for ($CommandIndex = 0; $CommandIndex -lt $Commands.Count; $CommandIndex++) {
       $TargetId = [uint32]$Commands[$CommandIndex].Command
-      if (-not $FunctionParameters.ContainsKey($TargetId) -or $FunctionParameters[$TargetId] -ne 5) { continue }
-      $TargetRecord = $Program.Records | Where-Object Id -EQ $TargetId | Select-Object -First 1
+      if (-not $Functions.ContainsKey($TargetId) -or $Functions[$TargetId].ParameterCount -ne 5) { continue }
+      $TargetRecord = $Functions[$TargetId].Record
       if ($null -eq $TargetRecord -or $TargetRecord.Size -ge 128) { continue }
       # regsetsex is a small five-argument condition wrapper over regsets. Calls serialize one
       # root constant, one subkey string, list offset, WOW64 flag, and one outer condition string.
@@ -1581,6 +2356,59 @@ function Read-CreateInstallNullTerminatedString {
   [pscustomobject]@{ Value = [Text.Encoding]::UTF8.GetString($Bytes, $Offset, $End - $Offset); NextOffset = $End + 1 }
 }
 
+function Resolve-CreateInstallVolumeName {
+  <#
+  .SYNOPSIS
+    Expand one source-defined GEA volume-number placeholder.
+  .PARAMETER Pattern
+    GEA volume pattern stored in the main archive header.
+  .PARAMETER Number
+    One-based physical volume number passed to Gentee's str.out4 formatter.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Pattern,
+    [Parameter(Mandatory)][ValidateRange(2, 65535)][int]$Number
+  )
+
+  # CreateInstall writes printf-style %i/%d/%u placeholders, optionally with a zero-padded width.
+  # Requiring exactly one placeholder avoids guessing how arbitrary format strings are evaluated.
+  $Placeholders = [regex]::Matches($Pattern, '%(?<Zero>0?)(?<Width>[1-9][0-9]?)?[diu]', [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+  if ($Placeholders.Count -ne 1) { throw "The GEA volume pattern '$Pattern' does not contain exactly one supported number placeholder" }
+  $Match = $Placeholders[0]
+  $Width = $Match.Groups['Width'].Success ? [int]$Match.Groups['Width'].Value : 0
+  $NumberText = $Number.ToString([Globalization.CultureInfo]::InvariantCulture)
+  if ($Width -gt 0) {
+    # str.out4 follows printf width semantics: a leading zero requests zero padding, otherwise
+    # the decimal value is space padded. Spaces are legal in companion-volume file names.
+    $NumberText = $NumberText.PadLeft($Width, $Match.Groups['Zero'].Value -eq '0' ? '0' : ' ')
+  }
+  return $Pattern.Substring(0, $Match.Index) + $NumberText + $Pattern.Substring($Match.Index + $Match.Length)
+}
+
+function Resolve-CreateInstallVolumePath {
+  <#
+  .SYNOPSIS
+    Resolve a generated GEA companion name beneath an explicitly selected directory.
+  .PARAMETER Directory
+    Directory containing the companion volumes.
+  .PARAMETER Name
+    Generated relative companion name.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Directory,
+    [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Name
+  )
+
+  if ([IO.Path]::IsPathRooted($Name)) { throw "The GEA companion name '$Name' is rooted" }
+  $Root = [IO.Path]::GetFullPath($Directory)
+  $RootPrefix = $Root.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+  $Candidate = [IO.Path]::GetFullPath((Join-Path $Root $Name))
+  if (-not $Candidate.StartsWith($RootPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw "The GEA companion name '$Name' escapes the volume directory" }
+  return $Candidate
+}
+
 function Read-CreateInstallArchiveLogicalRange {
   <#
   .SYNOPSIS
@@ -1604,8 +2432,8 @@ function Read-CreateInstallArchiveLogicalRange {
   )
 
   if ($Offset -lt 0 -or $Offset + $Count -gt $Layout.SummarySize) { throw 'The requested GEA logical range is outside the compressed data stream' }
-  # GEA exposes one logical compressed stream even though moved bytes are physically stored before
-  # ordinary data. Translate each requested slice without joining the complete archive in memory.
+  # GEA exposes one logical compressed stream across the main file, companion volumes, and the
+  # moved prefix in the main header. Translate slices without joining the archive in memory.
   $Result = [byte[]]::new($Count)
   if ($Count -eq 0) { return , $Result }
   $OwnedStream = $null
@@ -1618,18 +2446,21 @@ function Read-CreateInstallArchiveLogicalRange {
     $LogicalOffset = $Offset
     $DestinationOffset = 0
     while ($Remaining -gt 0) {
-      if ($LogicalOffset -lt $Layout.OrdinaryDataLength) {
-        # Logical data starts in the ordinary region and wraps into the moved prefix at its end.
-        $Available = $Layout.OrdinaryDataLength - $LogicalOffset
-        $PhysicalOffset = $Layout.ArchiveOffset + $Layout.HeaderSize + $Layout.MovedSize + $LogicalOffset
-      } else {
-        $MovedOffset = $LogicalOffset - $Layout.OrdinaryDataLength
-        $Available = $Layout.MovedSize - $MovedOffset
-        $PhysicalOffset = $Layout.ArchiveOffset + $Layout.HeaderSize + $MovedOffset
-      }
+      $Segment = @($Layout.DataSegments | Where-Object { $LogicalOffset -ge $_.LogicalOffset -and $LogicalOffset -lt $_.LogicalOffset + $_.Length } | Select-Object -First 1)
+      if ($Segment.Count -ne 1) { throw 'The GEA logical range crosses an unavailable volume' }
+      $Segment = $Segment[0]
+      if (-not $Segment.Available) { throw "The GEA companion volume '$($Segment.Path)' is unavailable" }
+      $SegmentOffset = $LogicalOffset - $Segment.LogicalOffset
+      $Available = $Segment.Length - $SegmentOffset
+      $PhysicalOffset = $Segment.PhysicalOffset + $SegmentOffset
       $ReadCount = [int][Math]::Min($Remaining, $Available)
       if ($ReadCount -le 0) { throw 'The GEA logical range crosses an unavailable volume' }
-      $Chunk = Read-BinaryBytes -Stream $Stream -Offset $PhysicalOffset -Count $ReadCount
+      $SegmentOwnedStream = $null
+      $SegmentStream = if ($Segment.Path -ieq $Layout.Path) { $Stream } else {
+        $SegmentOwnedStream = [IO.File]::Open($Segment.Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+        $SegmentOwnedStream
+      }
+      try { $Chunk = Read-BinaryBytes -Stream $SegmentStream -Offset $PhysicalOffset -Count $ReadCount } finally { if ($SegmentOwnedStream) { $SegmentOwnedStream.Dispose() } }
       [Array]::Copy($Chunk, 0, $Result, $DestinationOffset, $ReadCount)
       $Remaining -= $ReadCount
       $DestinationOffset += $ReadCount
@@ -1717,13 +2548,26 @@ function Get-CreateInstallArchiveLayout {
     Locate and parse the self-extracting CreateInstall GEA archive
   .PARAMETER Path
     Path to the installer or format artifact read by this function.
+  .PARAMETER VolumePath
+    Optional directory containing GEA companion volumes. The source installer's directory is used
+    by default. Companion names are always derived from the validated main-header pattern.
   #>
   [OutputType([pscustomobject])]
-  param ([Parameter(Mandatory)][string]$Path)
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [AllowNull()][string]$VolumePath
+  )
 
   Import-CreateInstallLzgeDecoder
   $Signature = [byte[]](0x47, 0x45, 0x41, 0x00)
   $File = Get-Item -LiteralPath $Path -Force
+  $VolumeDirectory = if ([string]::IsNullOrWhiteSpace($VolumePath)) {
+    $File.DirectoryName
+  } else {
+    $VolumeDirectoryItem = Get-Item -LiteralPath $VolumePath -Force
+    if (-not $VolumeDirectoryItem.PSIsContainer) { throw "The GEA volume path '$VolumePath' is not a directory" }
+    $VolumeDirectoryItem.FullName
+  }
   $Stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
   try {
     # SETUP_TEMP is stored as a standalone GEA resource inside CreateInstall's PE. Reuse this
@@ -1735,6 +2579,7 @@ function Get-CreateInstallArchiveLayout {
   # Search only after the PE image and validate every GEA candidate through its complete size map;
   # compiled signature strings in the setup stub are not archive evidence.
   foreach ($ArchiveOffset in @(Find-BinaryPattern -Path $File.FullName -Pattern $Signature -StartOffset $OverlayOffset -Maximum 16)) {
+    $StrongCandidate = $false
     $Stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
     try {
       if ($ArchiveOffset + 73 -gt $Stream.Length) { continue }
@@ -1757,18 +2602,17 @@ function Get-CreateInstallArchiveLayout {
       $Memory = $Header[70]
       $BlockMultiplier = $Header[71]
       $SolidMultiplier = $Header[72]
-      # Dumplings supports self-contained single-volume SFX archives only. Multi-volume patterns
-      # are reported by rejection rather than followed outside the installer.
-      if ($VolumeCount -ne 1 -or $HeaderSize -lt 74 -or $HeaderSize -gt $Script:CreateInstallMaximumHeaderBytes -or $InfoSize -gt $Script:CreateInstallMaximumInfoBytes) { continue }
+      if ($VolumeCount -lt 1 -or $VolumeCount -gt $Script:CreateInstallMaximumVolumes -or $HeaderSize -lt 74 -or $HeaderSize -gt $Script:CreateInstallMaximumHeaderBytes -or $InfoSize -gt $Script:CreateInstallMaximumInfoBytes) { continue }
       if ($ArchiveFileSize -le $ArchiveOffset -or $ArchiveFileSize -gt $File.Length -or $HeaderSize -gt $ArchiveFileSize - $ArchiveOffset) { continue }
       if ($SummarySize -lt 0 -or $MovedSize -gt $SummarySize) { continue }
-      $OrdinaryDataLength = $ArchiveFileSize - $MovedSize - $HeaderSize - $ArchiveOffset
-      if ($OrdinaryDataLength -lt 0 -or $OrdinaryDataLength + $MovedSize -ne $SummarySize) { continue }
+      $MainDataLength = $ArchiveFileSize - $MovedSize - $HeaderSize - $ArchiveOffset
+      if ($MainDataLength -lt 0) { continue }
 
       # Variable header data starts with the volume pattern, then optional password IDs, then the
       # compressed or stored file descriptor table.
       $HeaderBytes = Read-BinaryBytes -Stream $Stream -Offset $ArchiveOffset -Count ([int]$HeaderSize)
       $PatternData = Read-CreateInstallNullTerminatedString -Bytes $HeaderBytes -Offset 73
+      if ($VolumeCount -gt 1 -and [string]::IsNullOrWhiteSpace($PatternData.Value)) { continue }
       $MetadataOffset = $PatternData.NextOffset
       if (($Flags -band $Script:CreateInstallFlagPassword) -ne 0) {
         if ($MetadataOffset + 2 -gt $HeaderBytes.Length) { continue }
@@ -1789,31 +2633,84 @@ function Get-CreateInstallArchiveLayout {
       # candidate archive.
       $Entries = @(ConvertFrom-CreateInstallFileTable -Bytes $Metadata -MajorVersion $MajorVersion)
       if ($Entries.Count -eq 0 -or ($Entries[-1].DataOffset + [long]$Entries[-1].CompressedSize) -ne $SummarySize) { continue }
+      $StrongCandidate = $true
+
+      # The decoder exposes a single logical byte stream. It consists of ordinary bytes in the
+      # main SFX, bytes in each companion after its ten-byte geavolume header, then moved bytes
+      # stored immediately after the main variable header. Missing companions do not invalidate
+      # the catalog, but extraction remains unavailable until every required segment is present.
+      $DataSegments = [Collections.Generic.List[object]]::new([int]$VolumeCount + 1)
+      $VolumeFiles = [Collections.Generic.List[object]]::new([int]$VolumeCount)
+      $MissingVolumes = [Collections.Generic.List[object]]::new()
+      $LogicalOffset = 0L
+      $DataSegments.Add([pscustomobject]@{ Index = 0; LogicalOffset = $LogicalOffset; Length = [long]$MainDataLength; Path = $File.FullName; PhysicalOffset = [long]$ArchiveOffset + $HeaderSize + $MovedSize; Available = $true })
+      $VolumeFiles.Add([pscustomobject]@{ Index = 0; VolumeNumber = 0; DisplayNumber = 1; Path = $File.FullName; ExpectedSize = [long]$ArchiveFileSize; ActualSize = [long]$File.Length; Available = $true })
+      $LogicalOffset += $MainDataLength
+
+      for ($VolumeIndex = 1; $VolumeIndex -lt $VolumeCount; $VolumeIndex++) {
+        $ExpectedSize = if ($VolumeIndex -eq $VolumeCount - 1) { $LastVolumeSize } else { $VolumeSize }
+        if ($ExpectedSize -lt 10) { throw "GEA companion volume $($VolumeIndex + 1) has an invalid declared size" }
+        $VolumeName = Resolve-CreateInstallVolumeName -Pattern $PatternData.Value -Number ($VolumeIndex + 1)
+        $CompanionPath = Resolve-CreateInstallVolumePath -Directory $VolumeDirectory -Name $VolumeName
+        $Available = Test-Path -LiteralPath $CompanionPath -PathType Leaf
+        $ActualSize = $null
+        if ($Available) {
+          $Companion = Get-Item -LiteralPath $CompanionPath -Force
+          $ActualSize = [long]$Companion.Length
+          if ($Companion.Length -lt $ExpectedSize) { throw "GEA companion volume '$CompanionPath' is shorter than its declared size" }
+          $CompanionStream = [IO.File]::Open($Companion.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+          try { $CompanionHeader = Read-BinaryBytes -Stream $CompanionStream -Offset 0 -Count 10 } finally { $CompanionStream.Dispose() }
+          if ([BitConverter]::ToUInt32($CompanionHeader, 0) -ne 0x00414547 -or [BitConverter]::ToUInt16($CompanionHeader, 4) -ne $VolumeIndex -or [BitConverter]::ToUInt32($CompanionHeader, 6) -ne $UniqueId) {
+            throw "GEA companion volume '$CompanionPath' does not belong to this archive"
+          }
+        }
+        $VolumeEvidence = [pscustomobject]@{ Index = $VolumeIndex; VolumeNumber = $VolumeIndex; DisplayNumber = $VolumeIndex + 1; Name = $VolumeName; Path = $CompanionPath; ExpectedSize = [long]$ExpectedSize; ActualSize = $ActualSize; Available = $Available }
+        $VolumeFiles.Add($VolumeEvidence)
+        if (-not $Available) { $MissingVolumes.Add($VolumeEvidence) }
+        $SegmentLength = $ExpectedSize - 10
+        $DataSegments.Add([pscustomobject]@{ Index = $VolumeIndex; LogicalOffset = $LogicalOffset; Length = [long]$SegmentLength; Path = $CompanionPath; PhysicalOffset = 10L; Available = $Available })
+        $LogicalOffset += $SegmentLength
+      }
+      if ($MovedSize -gt 0) {
+        $DataSegments.Add([pscustomobject]@{ Index = $VolumeCount; LogicalOffset = $LogicalOffset; Length = [long]$MovedSize; Path = $File.FullName; PhysicalOffset = [long]$ArchiveOffset + $HeaderSize; Available = $true })
+        $LogicalOffset += $MovedSize
+      }
+      if ($LogicalOffset -ne $SummarySize) { throw 'The GEA physical volume map does not equal the declared logical data size' }
+
       return [pscustomobject]@{
-        Path               = $File.FullName
-        ArchiveOffset      = [long]$ArchiveOffset
-        UniqueId           = [uint32]$UniqueId
-        MajorVersion       = [byte]$MajorVersion
-        MinorVersion       = [byte]$MinorVersion
-        ArchiveProfile     = [string]$ArchiveProfile[0].Id
-        Flags              = [uint32]$Flags
-        VolumeCount        = [uint16]$VolumeCount
-        HeaderSize         = [long]$HeaderSize
-        SummarySize        = [long]$SummarySize
-        InfoSize           = [long]$InfoSize
-        ArchiveFileSize    = [long]$ArchiveFileSize
-        VolumeSize         = [long]$VolumeSize
-        LastVolumeSize     = [long]$LastVolumeSize
-        MovedSize          = [long]$MovedSize
-        OrdinaryDataLength = [long]$OrdinaryDataLength
-        PasswordCount      = [int]$PasswordCount
-        MemoryMegabytes    = [int]$Memory
-        BlockSize          = [long]$BlockMultiplier * 0x40000
-        SolidSize          = [long]$SolidMultiplier * 0x40000
-        VolumePattern      = $PatternData.Value
-        Entries            = $Entries
+        Path                = $File.FullName
+        ArchiveOffset       = [long]$ArchiveOffset
+        UniqueId            = [uint32]$UniqueId
+        MajorVersion        = [byte]$MajorVersion
+        MinorVersion        = [byte]$MinorVersion
+        ArchiveProfile      = [string]$ArchiveProfile[0].Id
+        Flags               = [uint32]$Flags
+        VolumeCount         = [uint16]$VolumeCount
+        HeaderSize          = [long]$HeaderSize
+        SummarySize         = [long]$SummarySize
+        InfoSize            = [long]$InfoSize
+        ArchiveFileSize     = [long]$ArchiveFileSize
+        VolumeSize          = [long]$VolumeSize
+        LastVolumeSize      = [long]$LastVolumeSize
+        MovedSize           = [long]$MovedSize
+        OrdinaryDataLength  = [long]($SummarySize - $MovedSize)
+        MainDataLength      = [long]$MainDataLength
+        PasswordCount       = [int]$PasswordCount
+        MemoryMegabytes     = [int]$Memory
+        BlockSize           = [long]$BlockMultiplier * 0x40000
+        SolidSize           = [long]$SolidMultiplier * 0x40000
+        VolumePattern       = $PatternData.Value
+        VolumeDirectory     = $VolumeDirectory
+        VolumeFiles         = $VolumeFiles.ToArray()
+        MissingVolumes      = $MissingVolumes.ToArray()
+        AllVolumesAvailable = $MissingVolumes.Count -eq 0
+        DataSegments        = $DataSegments.ToArray()
+        Entries             = $Entries
       }
     } catch {
+      # Once the complete catalog and logical size agree, this is no longer a coincidental magic
+      # string. Preserve companion-volume and segment-integrity errors for actionable diagnostics.
+      if ($StrongCandidate) { throw }
       # A structurally invalid candidate may be payload data containing GEA\0; continue scanning.
       continue
     } finally { $Stream.Dispose() }
@@ -2102,9 +2999,15 @@ function Get-CreateInstallInfo {
     Read static CreateInstall identity and GEA payload evidence
   .PARAMETER Path
     Path to the installer or format artifact read by this function.
+  .PARAMETER VolumePath
+    Optional directory containing GEA companion volumes. Missing companions preserve metadata
+    evidence but prevent payload expansion and payload-derived architecture analysis.
   #>
   [OutputType([pscustomobject])]
-  param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
+    [AllowNull()][string]$VolumePath
+  )
 
   process {
     $File = Get-Item -LiteralPath $Path -Force
@@ -2129,23 +3032,34 @@ function Get-CreateInstallInfo {
     $PayloadAnalysis = $null
     $ShortcutEvidence = $null
     $RunEvidence = $null
+    $EnvironmentEvidence = $null
+    $PrerequisiteEvidence = $null
+    $ServiceEvidence = $null
+    $RegistrationEvidence = $null
+    $ScheduledTaskEvidence = $null
+    $FileOperationEvidence = $null
+    $DownloadEvidence = $null
+    $ArchiveOperationEvidence = $null
+    $ConfigurationEvidence = $null
     try { $Program = Get-CreateInstallGenteeProgram -Path $File.FullName } catch {
       $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.Program.Unavailable' -Source CreateInstall -Message "The compiled CreateInstall project program could not be decoded: $($_.Exception.Message)" -Kind Incomplete -Areas Metadata -AffectedFields @('ProductCode', 'DefaultInstallLocation', 'AppsAndFeaturesEntries')))
     }
     $Layout = $null
     $LayoutError = $null
-    try { $Layout = Get-CreateInstallArchiveLayout -Path $File.FullName } catch { $LayoutError = $_ }
+    try { $Layout = Get-CreateInstallArchiveLayout -Path $File.FullName -VolumePath $VolumePath } catch { $LayoutError = $_ }
     if ($null -eq $Program -and $null -eq $Layout) { throw $LayoutError }
     if ($null -eq $Layout) {
       # CreateInstall permits projects without packaged files. Their compiled program remains fully
       # analyzable, but extraction and installed-file projection have no GEA source.
       $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.Archive.Absent' -Source CreateInstall -Message 'The CreateInstall project contains no GEA payload archive.' -Kind Information -Areas Extraction))
-    } else {
+    } elseif ($Layout.AllVolumesAvailable) {
       # Enumerate block headers without expanding payloads so capability warnings remain inexpensive.
       $ArchiveStream = [IO.File]::Open($Layout.Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
       try {
         foreach ($Entry in $Layout.Entries) { foreach ($Block in @(Get-CreateInstallBlockInfo -Layout $Layout -Entry $Entry -Stream $ArchiveStream)) { $null = $CompressionMethods.Add($Block.CompressionName) } }
       } finally { $ArchiveStream.Dispose() }
+    } else {
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.Archive.VolumeMissing' -Source CreateInstall -Message "The CreateInstall GEA archive requires $($Layout.MissingVolumes.Count) unavailable companion volume(s); metadata is retained but payload extraction is unavailable." -Kind Incomplete -Areas Extraction -Evidence $Layout.MissingVolumes))
     }
     if ($null -ne $Program) {
       try { $ProjectVariableEvidence = Get-CreateInstallProjectVariableEvidence -Program $Program } catch {
@@ -2171,6 +3085,33 @@ function Get-CreateInstallInfo {
         }
         try { $RunEvidence = Get-CreateInstallRunEvidence -Program $Program -ProjectVariableEvidence $ProjectVariableEvidence -Is32Bit $Is32Bit } catch {
           $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.Run.Incomplete' -Source CreateInstall -Message "Compiled CreateInstall child-process operations could not be parsed completely: $($_.Exception.Message)" -Kind Incomplete -Areas Installability))
+        }
+        try { $EnvironmentEvidence = Get-CreateInstallEnvironmentEvidence -Program $Program -ProjectVariableEvidence $ProjectVariableEvidence -Is32Bit $Is32Bit } catch {
+          $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.Environment.Incomplete' -Source CreateInstall -Message "Compiled CreateInstall environment-variable operations could not be parsed completely: $($_.Exception.Message)" -Kind Incomplete -Areas Metadata))
+        }
+        try { $PrerequisiteEvidence = Get-CreateInstallPrerequisiteEvidence -Program $Program -ProjectVariableEvidence $ProjectVariableEvidence -Is32Bit $Is32Bit } catch {
+          $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.Prerequisite.Incomplete' -Source CreateInstall -Message "Compiled CreateInstall prerequisite checks could not be parsed completely: $($_.Exception.Message)" -Kind Incomplete -Areas Installability -AffectedFields Dependencies))
+        }
+        try { $ServiceEvidence = Get-CreateInstallServiceEvidence -Program $Program -ProjectVariableEvidence $ProjectVariableEvidence -Is32Bit $Is32Bit } catch {
+          $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.Service.Incomplete' -Source CreateInstall -Message "Compiled CreateInstall service operations could not be parsed completely: $($_.Exception.Message)" -Kind Incomplete -Areas Metadata, Installability))
+        }
+        try { $RegistrationEvidence = Get-CreateInstallRegistrationEvidence -Program $Program -ProjectVariableEvidence $ProjectVariableEvidence -Is32Bit $Is32Bit } catch {
+          $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.Registration.Incomplete' -Source CreateInstall -Message "Compiled CreateInstall registration operations could not be parsed completely: $($_.Exception.Message)" -Kind Incomplete -Areas Metadata))
+        }
+        try { $ScheduledTaskEvidence = Get-CreateInstallScheduledTaskEvidence -Program $Program -ProjectVariableEvidence $ProjectVariableEvidence -Is32Bit $Is32Bit } catch {
+          $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.ScheduledTask.Incomplete' -Source CreateInstall -Message "Compiled CreateInstall scheduled-task operations could not be parsed completely: $($_.Exception.Message)" -Kind Incomplete -Areas Metadata, Installability))
+        }
+        try { $FileOperationEvidence = Get-CreateInstallFileOperationEvidence -Program $Program -ProjectVariableEvidence $ProjectVariableEvidence -Is32Bit $Is32Bit } catch {
+          $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.Copy.Incomplete' -Source CreateInstall -Message "Compiled CreateInstall file-copy operations could not be parsed completely: $($_.Exception.Message)" -Kind Incomplete -Areas Extraction))
+        }
+        try { $DownloadEvidence = Get-CreateInstallDownloadEvidence -Program $Program -ProjectVariableEvidence $ProjectVariableEvidence -Is32Bit $Is32Bit } catch {
+          $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.Download.Incomplete' -Source CreateInstall -Message "Compiled CreateInstall download operations could not be parsed completely: $($_.Exception.Message)" -Kind Incomplete -Areas Extraction, Installability, Security))
+        }
+        try { $ArchiveOperationEvidence = Get-CreateInstallArchiveOperationEvidence -Program $Program -ProjectVariableEvidence $ProjectVariableEvidence -Is32Bit $Is32Bit } catch {
+          $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.ArchiveOperation.Incomplete' -Source CreateInstall -Message "Compiled CreateInstall nested-archive operations could not be parsed completely: $($_.Exception.Message)" -Kind Incomplete -Areas Extraction))
+        }
+        try { $ConfigurationEvidence = Get-CreateInstallConfigurationEvidence -Program $Program -ProjectVariableEvidence $ProjectVariableEvidence -Is32Bit $Is32Bit } catch {
+          $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.Configuration.Incomplete' -Source CreateInstall -Message "Compiled CreateInstall INI operations could not be parsed completely: $($_.Exception.Message)" -Kind Incomplete -Areas Metadata))
         }
       }
     }
@@ -2199,7 +3140,7 @@ function Get-CreateInstallInfo {
     $SilentResult = & $ResolveProjectVariable 'silentpar'
     $SilentSwitch = if ($null -ne $SilentResult -and $SilentResult.UnresolvedMacros.Count -eq 0) { ([string]$SilentResult.Value).Trim() } else { $null }
 
-    if ($null -ne $InstallFileEvidence -and $Layout.PasswordCount -eq 0 -and -not $CompressionMethods.Contains('Unknown')) {
+    if ($null -ne $InstallFileEvidence -and $Layout.AllVolumesAvailable -and $Layout.PasswordCount -eq 0 -and -not $CompressionMethods.Contains('Unknown')) {
       try {
         $PayloadAnalysis = Get-CreateInstallPayloadAnalysis -Layout $Layout -InstalledFile $InstallFileEvidence.InstalledFiles -ApplicationPath @($ExtensionEvidence.Calls.Application) -DefaultInstallLocation $DefaultInstallLocation
         foreach ($Diagnostic in $PayloadAnalysis.Diagnostics) { $Diagnostics.Add($Diagnostic) }
@@ -2275,6 +3216,15 @@ function Get-CreateInstallInfo {
     if ($null -ne $InstallFileEvidence) { foreach ($Diagnostic in $InstallFileEvidence.Diagnostics) { $Diagnostics.Add($Diagnostic) } }
     if ($null -ne $ShortcutEvidence) { foreach ($Diagnostic in $ShortcutEvidence.Diagnostics) { $Diagnostics.Add($Diagnostic) } }
     if ($null -ne $RunEvidence) { foreach ($Diagnostic in $RunEvidence.Diagnostics) { $Diagnostics.Add($Diagnostic) } }
+    if ($null -ne $EnvironmentEvidence) { foreach ($Diagnostic in $EnvironmentEvidence.Diagnostics) { $Diagnostics.Add($Diagnostic) } }
+    if ($null -ne $PrerequisiteEvidence) { foreach ($Diagnostic in $PrerequisiteEvidence.Diagnostics) { $Diagnostics.Add($Diagnostic) } }
+    if ($null -ne $ServiceEvidence) { foreach ($Diagnostic in $ServiceEvidence.Diagnostics) { $Diagnostics.Add($Diagnostic) } }
+    if ($null -ne $RegistrationEvidence) { foreach ($Diagnostic in $RegistrationEvidence.Diagnostics) { $Diagnostics.Add($Diagnostic) } }
+    if ($null -ne $ScheduledTaskEvidence) { foreach ($Diagnostic in $ScheduledTaskEvidence.Diagnostics) { $Diagnostics.Add($Diagnostic) } }
+    if ($null -ne $FileOperationEvidence) { foreach ($Diagnostic in $FileOperationEvidence.Diagnostics) { $Diagnostics.Add($Diagnostic) } }
+    if ($null -ne $DownloadEvidence) { foreach ($Diagnostic in $DownloadEvidence.Diagnostics) { $Diagnostics.Add($Diagnostic) } }
+    if ($null -ne $ArchiveOperationEvidence) { foreach ($Diagnostic in $ArchiveOperationEvidence.Diagnostics) { $Diagnostics.Add($Diagnostic) } }
+    if ($null -ne $ConfigurationEvidence) { foreach ($Diagnostic in $ConfigurationEvidence.Diagnostics) { $Diagnostics.Add($Diagnostic) } }
     if ($null -ne $CustomRegistryEvidence) {
       # Custom registry commands execute after the generated setup body and therefore override
       # built-in ARP values when both address the same uninstall key and value name.
@@ -2332,6 +3282,51 @@ function Get-CreateInstallInfo {
       if ($null -ne $RunEvidence) {
         foreach ($Call in @($RunEvidence.Calls)) {
           & $AddGenteeExpression 'Run' $Call @() ([pscustomobject]@{ Kind = $Call.Kind; Executable = $Call.Executable; NestedInstallerPath = $Call.PSObject.Properties['NestedInstallerPath'] ? $Call.NestedInstallerPath : $null; Arguments = $Call.Arguments }) ([string]$Call.ConditionExpression)
+        }
+      }
+      if ($null -ne $EnvironmentEvidence) {
+        foreach ($Change in @($EnvironmentEvidence.EnvironmentChanges)) {
+          & $AddGenteeExpression 'Environment' $Change @() ([pscustomobject]@{ Operation = $Change.Operation; Name = $Change.Name; Value = $Change.Value; Scope = $Change.Scope }) ([string]$Change.ConditionExpression)
+        }
+      }
+      if ($null -ne $PrerequisiteEvidence) {
+        foreach ($Check in @($PrerequisiteEvidence.PrerequisiteChecks)) {
+          & $AddGenteeExpression 'Prerequisite' $Check @('Dependencies') ([pscustomobject]@{ Kind = $Check.Kind; Architecture = $Check.Architecture; Versions = $Check.Versions; Combination = $Check.Combination }) ([string]$Check.ConditionExpression)
+        }
+      }
+      if ($null -ne $ServiceEvidence) {
+        foreach ($Service in @($ServiceEvidence.Services)) {
+          & $AddGenteeExpression 'Service' $Service @() ([pscustomobject]@{ Operation = $Service.Operation; Name = $Service.Name; BinaryPath = $Service.BinaryPath }) ([string]$Service.ConditionExpression)
+        }
+      }
+      if ($null -ne $RegistrationEvidence) {
+        foreach ($Registration in @($RegistrationEvidence.Registrations)) {
+          & $AddGenteeExpression 'Registration' $Registration @() ([pscustomobject]@{ Kind = $Registration.Kind; Path = $Registration.Path }) ([string]$Registration.ConditionExpression)
+        }
+      }
+      if ($null -ne $ScheduledTaskEvidence) {
+        foreach ($Task in @($ScheduledTaskEvidence.ScheduledTasks)) {
+          & $AddGenteeExpression 'ScheduledTask' $Task @() ([pscustomobject]@{ Operation = $Task.Operation; Name = $Task.Name; Executable = $Task.Executable }) ([string]$Task.ConditionExpression)
+        }
+      }
+      if ($null -ne $FileOperationEvidence) {
+        foreach ($FileOperation in @($FileOperationEvidence.FileOperations)) {
+          & $AddGenteeExpression 'FileOperation' $FileOperation @() ([pscustomobject]@{ Operation = $FileOperation.Operation; Source = $FileOperation.Source; Destination = $FileOperation.Destination }) ([string]$FileOperation.ConditionExpression)
+        }
+      }
+      if ($null -ne $DownloadEvidence) {
+        foreach ($Download in @($DownloadEvidence.Downloads)) {
+          & $AddGenteeExpression 'Download' $Download @() ([pscustomobject]@{ Url = $Download.Url; Destination = $Download.Destination }) ([string]$Download.ConditionExpression)
+        }
+      }
+      if ($null -ne $ArchiveOperationEvidence) {
+        foreach ($ArchiveOperation in @($ArchiveOperationEvidence.ArchiveOperations)) {
+          & $AddGenteeExpression 'ArchiveOperation' $ArchiveOperation @() ([pscustomobject]@{ Format = $ArchiveOperation.Format; Source = $ArchiveOperation.Source; Destination = $ArchiveOperation.Destination }) ([string]$ArchiveOperation.ConditionExpression)
+        }
+      }
+      if ($null -ne $ConfigurationEvidence) {
+        foreach ($Change in @($ConfigurationEvidence.ConfigurationChanges)) {
+          & $AddGenteeExpression 'Configuration' $Change @() ([pscustomobject]@{ Operation = $Change.Operation; FilePath = $Change.FilePath; Section = $Change.Section; Key = $Change.Key }) ([string]$Change.ConditionExpression)
         }
       }
     }
@@ -2396,6 +3391,15 @@ function Get-CreateInstallInfo {
       CustomRegistryCalls          = if ($null -ne $CustomRegistryEvidence) { $CustomRegistryEvidence.Calls } else { @() }
       Shortcuts                    = if ($null -ne $ShortcutEvidence) { $ShortcutEvidence.Calls } else { @() }
       ExecutedPayloads             = if ($null -ne $RunEvidence) { $RunEvidence.Calls } else { @() }
+      EnvironmentChanges           = if ($null -ne $EnvironmentEvidence) { $EnvironmentEvidence.EnvironmentChanges } else { @() }
+      PrerequisiteChecks           = if ($null -ne $PrerequisiteEvidence) { $PrerequisiteEvidence.PrerequisiteChecks } else { @() }
+      Services                     = if ($null -ne $ServiceEvidence) { $ServiceEvidence.Services } else { @() }
+      Registrations                = if ($null -ne $RegistrationEvidence) { $RegistrationEvidence.Registrations } else { @() }
+      ScheduledTasks               = if ($null -ne $ScheduledTaskEvidence) { $ScheduledTaskEvidence.ScheduledTasks } else { @() }
+      FileOperations               = if ($null -ne $FileOperationEvidence) { $FileOperationEvidence.FileOperations } else { @() }
+      Downloads                    = if ($null -ne $DownloadEvidence) { $DownloadEvidence.Downloads } else { @() }
+      ArchiveOperations            = if ($null -ne $ArchiveOperationEvidence) { $ArchiveOperationEvidence.ArchiveOperations } else { @() }
+      ConfigurationChanges         = if ($null -ne $ConfigurationEvidence) { $ConfigurationEvidence.ConfigurationChanges } else { @() }
       InstallGroupRoute            = if ($null -ne $InstallFileEvidence) { $InstallFileEvidence.RouteId } else { $null }
       InstallGroupCalls            = if ($null -ne $InstallFileEvidence) { $InstallFileEvidence.Calls } else { @() }
       InstalledFiles               = if ($null -ne $InstallFileEvidence) { $InstallFileEvidence.InstalledFiles } else { @() }
@@ -2406,10 +3410,10 @@ function Get-CreateInstallInfo {
       PayloadArchitectureInfo      = if ($null -ne $PayloadAnalysis) { $PayloadAnalysis.ArchitectureInfo } else { @() }
       PayloadDependencyInfo        = if ($null -ne $PayloadAnalysis) { $PayloadAnalysis.DependencyInfo } else { $null }
       PayloadAnalysisFiles         = if ($null -ne $PayloadAnalysis) { $PayloadAnalysis.InspectedFiles } else { @() }
-      GEA                          = if ($null -ne $Layout) { [pscustomobject]@{ ArchiveProfile = $Layout.ArchiveProfile; MajorVersion = $Layout.MajorVersion; MinorVersion = $Layout.MinorVersion; ArchiveOffset = $Layout.ArchiveOffset; HeaderSize = $Layout.HeaderSize; SummarySize = $Layout.SummarySize; MovedSize = $Layout.MovedSize; BlockSize = $Layout.BlockSize; SolidSize = $Layout.SolidSize; EntryCount = $Layout.Entries.Count; CompressionMethods = @($CompressionMethods | Sort-Object); UnsupportedCompressionMethods = @($CompressionMethods | Where-Object { $_ -eq 'Unknown' } | Sort-Object); PasswordCount = $Layout.PasswordCount } } else { $null }
+      GEA                          = if ($null -ne $Layout) { [pscustomobject]@{ ArchiveProfile = $Layout.ArchiveProfile; MajorVersion = $Layout.MajorVersion; MinorVersion = $Layout.MinorVersion; ArchiveOffset = $Layout.ArchiveOffset; HeaderSize = $Layout.HeaderSize; SummarySize = $Layout.SummarySize; MovedSize = $Layout.MovedSize; BlockSize = $Layout.BlockSize; SolidSize = $Layout.SolidSize; EntryCount = $Layout.Entries.Count; CompressionMethods = @($CompressionMethods | Sort-Object); UnsupportedCompressionMethods = @($CompressionMethods | Where-Object { $_ -eq 'Unknown' } | Sort-Object); PasswordCount = $Layout.PasswordCount; VolumeCount = $Layout.VolumeCount; VolumePattern = $Layout.VolumePattern; VolumeDirectory = $Layout.VolumeDirectory; VolumeFiles = $Layout.VolumeFiles; MissingVolumes = $Layout.MissingVolumes; AllVolumesAvailable = $Layout.AllVolumesAvailable } } else { $null }
       ExtractedFiles               = if ($null -ne $Layout) { @($Layout.Entries.FullName) } else { @() }
-      CanExpand                    = $null -ne $Layout -and $Layout.PasswordCount -eq 0 -and -not $CompressionMethods.Contains('Unknown')
-      ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.CreateInstall'; ParserMajor = 7; FormatCatalogVersion = [int]$Script:CreateInstallFormatCatalog.CatalogVersion; ArchiveProfile = if ($null -ne $Layout) { $Layout.ArchiveProfile } else { $null }; AddRemoveProfile = if ($null -ne $UninstallEvidence) { $UninstallEvidence.ProgramInfo.AddRemoveProfile } else { $null }; InstallGroupRoute = if ($null -ne $InstallFileEvidence) { $InstallFileEvidence.RouteId } else { $null }; Sources = @('PE version resource', 'PE application manifest', 'Gentee launcher/linkhead and GE 4.0 object serialization', 'CreateInstall generated MAINVAR/g_list data', 'CreateInstall addremove/addremoveex/addremoveext command source', 'CreateInstall regsetsex, extension, shortcut, and run command source', 'CreateInstall unpackgroup/unpackgroupex command source', 'Gentee GEA v1/v2 structures', 'Gentee LZGE decoder', 'Gentee-modified PPMd-I decoder') }
+      CanExpand                    = $null -ne $Layout -and $Layout.AllVolumesAvailable -and $Layout.PasswordCount -eq 0 -and -not $CompressionMethods.Contains('Unknown')
+      ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.CreateInstall'; ParserMajor = 10; FormatCatalogVersion = [int]$Script:CreateInstallFormatCatalog.CatalogVersion; ArchiveProfile = if ($null -ne $Layout) { $Layout.ArchiveProfile } else { $null }; AddRemoveProfile = if ($null -ne $UninstallEvidence) { $UninstallEvidence.ProgramInfo.AddRemoveProfile } else { $null }; InstallGroupRoute = if ($null -ne $InstallFileEvidence) { $InstallFileEvidence.RouteId } else { $null }; Sources = @('PE version resource', 'PE application manifest', 'Gentee launcher/linkhead and GE 4.0 object serialization', 'Gentee generated MAINVAR/g_list data and imported-function records', 'CreateInstall addremove/addremoveex/addremoveext command source', 'CreateInstall registry, association, shortcut, process, environment, prerequisite, service, registration, scheduled-task, copy, download, archive, and INI command sources', 'CreateInstall unpackgroup/unpackgroupex command source', 'Gentee GEA v1/v2 single-volume and spanned-volume structures', 'Gentee LZGE decoder', 'Gentee-modified PPMd-I decoder') }
     }
   }
 }
@@ -2424,6 +3428,8 @@ function Expand-CreateInstallInstaller {
     Destination path for bounded extraction or decoded output; payload-relative names are resolved beneath this path.
   .PARAMETER Name
     Exact name or wildcard used to select format records or payload entries.
+  .PARAMETER VolumePath
+    Optional directory containing companion GEA volumes named by the main archive header.
   .PARAMETER MaximumExpandedBytes
     Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   .PARAMETER CollisionAction
@@ -2434,12 +3440,14 @@ function Expand-CreateInstallInstaller {
     [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
     [string]$DestinationPath,
     [string[]]$Name = '*',
+    [AllowNull()][string]$VolumePath,
     [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
     [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = 17179869184
   )
 
   process {
-    $Layout = Get-CreateInstallArchiveLayout -Path $Path
+    $Layout = Get-CreateInstallArchiveLayout -Path $Path -VolumePath $VolumePath
+    if (-not $Layout.AllVolumesAvailable) { throw "The CreateInstall archive cannot be expanded because $($Layout.MissingVolumes.Count) companion volume(s) are unavailable" }
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = Join-Path ([IO.Path]::GetTempPath()) ("Dumplings-CreateInstall-$([guid]::NewGuid().ToString('N'))") }
     return Export-CreateInstallArchiveSelection -Layout $Layout -DestinationPath $DestinationPath -Name $Name -CollisionAction $CollisionAction -MaximumExpandedBytes $MaximumExpandedBytes
   }

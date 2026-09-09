@@ -64,6 +64,8 @@ namespace Dumplings.MicaSetup
         public string TargetFramework { get; set; } = string.Empty;
         public string RequestExecutionLevel { get; set; } = string.Empty;
         public bool? UseElevated { get; set; }
+        public bool? UseTempPathFork { get; set; }
+        public string SingleInstanceMutex { get; set; } = string.Empty;
         public string AssemblyName { get; set; } = string.Empty;
         public string AssemblyTitle { get; set; } = string.Empty;
         public string AssemblyProduct { get; set; } = string.Empty;
@@ -119,6 +121,17 @@ namespace Dumplings.MicaSetup
         internal int ArrayLength = -1;
         internal int LocalAddress = -1;
 
+        internal bool FullyResolved
+        {
+            get
+            {
+                if (!Resolved) { return false; }
+                if (Value is SymbolicObject symbolicObject) { return symbolicObject.IsResolved; }
+                if (Value is SymbolicArray symbolicArray) { return symbolicArray.IsResolved; }
+                return true;
+            }
+        }
+
         internal static SymbolicValue Constant(object value, string expression = null)
         {
             return new SymbolicValue { Value = value, Resolved = true, Expression = expression ?? (value == null ? "null" : value.ToString()) };
@@ -131,12 +144,57 @@ namespace Dumplings.MicaSetup
 
         internal static SymbolicValue Array(int length)
         {
-            return new SymbolicValue { Resolved = length == 0, Value = length == 0 ? System.Array.Empty<object>() : null, Expression = "array[" + length + "]", ArrayLength = length };
+            if (length < 0 || length > 65536) { return Unknown("array[" + length + "]"); }
+            return new SymbolicValue { Resolved = length == 0, Value = new SymbolicArray(length), Expression = "array[" + length + "]", ArrayLength = length };
+        }
+
+        internal static SymbolicValue Object(string typeName)
+        {
+            SymbolicObject value = new SymbolicObject(typeName);
+            if (typeName == "MicaSetup.Helper.CloseApplicationInfo")
+            {
+                // These defaults are emitted by the official model's parameterless constructor.
+                value.Properties["Target"] = Constant(string.Empty);
+                value.Properties["Description"] = Constant(null);
+                value.Properties["WindowTitle"] = Constant(null);
+                value.Properties["CloseMessage"] = Constant(true);
+                value.Properties["RebootPrompt"] = Constant(false);
+                value.Properties["TerminateProcess"] = Constant(true);
+                value.Properties["Timeout"] = Constant(5);
+            }
+            return new SymbolicValue { Value = value, Resolved = value.IsResolved, Expression = "new " + typeName };
         }
 
         internal SymbolicValue Clone()
         {
             return new SymbolicValue { Value = Value, Resolved = Resolved, Expression = Expression, ArrayLength = ArrayLength, LocalAddress = LocalAddress };
+        }
+    }
+
+    /// <summary>Tracks compiler-emitted array initializers without constructing target types.</summary>
+    internal sealed class SymbolicArray
+    {
+        internal readonly SymbolicValue[] Items;
+
+        internal SymbolicArray(int length) { Items = new SymbolicValue[length]; }
+
+        internal bool IsResolved
+        {
+            get { return Items.All(item => item != null && item.FullyResolved); }
+        }
+    }
+
+    /// <summary>Tracks one supported builder-generated object initializer without instantiating it.</summary>
+    internal sealed class SymbolicObject
+    {
+        internal readonly string TypeName;
+        internal readonly Dictionary<string, SymbolicValue> Properties = new Dictionary<string, SymbolicValue>(StringComparer.Ordinal);
+
+        internal SymbolicObject(string typeName) { TypeName = typeName; }
+
+        internal bool IsResolved
+        {
+            get { return Properties.Values.All(value => value != null && value.Resolved); }
         }
     }
 
@@ -226,7 +284,10 @@ namespace Dumplings.MicaSetup
             {
                 TypeDefinition type = reader.GetTypeDefinition(typeHandle);
                 string typeName = GetTypeName(reader, typeHandle);
-                if (typeName == "MicaSetup.Option")
+                // MicaSetup 1.1 introduced MicaSetup.Core.Option while retaining the UsePack host
+                // method. Later releases moved Option to the root namespace and renamed the host
+                // method to UseOptions. Both layouts expose the same compiled option semantics.
+                if (typeName == "MicaSetup.Option" || typeName == "MicaSetup.Core.Option")
                 {
                     result.HasOptionType = true;
                     foreach (PropertyDefinitionHandle propertyHandle in type.GetProperties())
@@ -291,8 +352,9 @@ namespace Dumplings.MicaSetup
                 if (totalInstructions > maximumInstructions) { throw new InvalidDataException("The CLR instruction count exceeds the configured MicaSetup parser limit."); }
                 int optionSetterCount = CountMicaConfigurationSetters(reader, instructions);
                 bool containsUseElevated = MethodContainsUseElevated(reader, instructions);
+                bool containsHostSetting = MethodContainsMicaHostSetting(reader, instructions);
                 bool containsLiteralRegistryWrite = MethodContainsLiteralRegistryWrite(reader, instructions);
-                if (optionSetterCount < 4 && !containsUseElevated && !containsLiteralRegistryWrite) { continue; }
+                if (optionSetterCount < 4 && !containsUseElevated && !containsHostSetting && !containsLiteralRegistryWrite) { continue; }
                 string declaringType = GetTypeName(reader, method.GetDeclaringType());
                 string displayName = declaringType + "::" + reader.GetString(method.Name);
                 Dictionary<string, MicaSetupOptionEvidence> targetAssignments = optionSetterCount >= 4
@@ -323,6 +385,21 @@ namespace Dumplings.MicaSetup
                 if (instruction.OpCode != OpCodes.Call && instruction.OpCode != OpCodes.Callvirt) { continue; }
                 MethodReferenceInfo method = ResolveMethod(reader, (int)instruction.Operand);
                 if (method != null && method.Name == "UseElevated" && method.DeclaringType.StartsWith("MicaSetup.", StringComparison.Ordinal)) { return true; }
+            }
+            return false;
+        }
+
+        private static bool MethodContainsMicaHostSetting(MetadataReader reader, List<IlInstruction> instructions)
+        {
+            foreach (IlInstruction instruction in instructions)
+            {
+                if (instruction.OpCode != OpCodes.Call && instruction.OpCode != OpCodes.Callvirt) { continue; }
+                MethodReferenceInfo method = ResolveMethod(reader, (int)instruction.Operand);
+                if (method != null && method.DeclaringType.StartsWith("MicaSetup.", StringComparison.Ordinal) &&
+                    (method.Name == "UseSingleInstance" || method.Name == "UseTempPathFork"))
+                {
+                    return true;
+                }
             }
             return false;
         }
@@ -429,7 +506,20 @@ namespace Dumplings.MicaSetup
                         Push(stack, value);
                         break;
                     }
-                    case 0xA2: Pop(stack); Pop(stack); Pop(stack); break;
+                    case 0xA2:
+                    {
+                        // C# emits dup/index/value/stelem.ref for string-array and collection-expression
+                        // initializers. The duplicate left on the stack shares this bounded symbolic array.
+                        SymbolicValue element = Pop(stack);
+                        SymbolicValue elementIndex = Pop(stack);
+                        SymbolicValue array = Pop(stack);
+                        if (array.Value is SymbolicArray symbolicArray && elementIndex.Resolved && elementIndex.Value is int integer && integer >= 0 && integer < symbolicArray.Items.Length)
+                        {
+                            symbolicArray.Items[integer] = element.Clone();
+                            array.Resolved = symbolicArray.IsResolved;
+                        }
+                        break;
+                    }
                     default:
                         if (instruction.OpCode.Value == unchecked((short)0xFE15))
                         {
@@ -449,7 +539,7 @@ namespace Dumplings.MicaSetup
             if (method == null) { Push(stack, SymbolicValue.Unknown("call")); return; }
             SymbolicValue[] arguments = new SymbolicValue[method.ParameterCount];
             for (int i = method.ParameterCount - 1; i >= 0; i--) { arguments[i] = Pop(stack); }
-            if (method.IsInstance && !isNewObject) { Pop(stack); }
+            SymbolicValue instance = method.IsInstance && !isNewObject ? Pop(stack) : null;
 
             if (IsMicaSetupConfigurationType(method.DeclaringType) && method.Name.StartsWith("set_", StringComparison.Ordinal) && arguments.Length == 1)
             {
@@ -465,6 +555,17 @@ namespace Dumplings.MicaSetup
                     IlOffset = ilOffset,
                     ArrayLength = value.ArrayLength
                 };
+                return;
+            }
+
+            // MakeMica emits CloseApplicationInfo arrays as ordinary object initializers. Track only
+            // this source-defined DTO and literal setters; arbitrary target objects remain unknown.
+            if (instance != null && instance.Value is SymbolicObject symbolicObject &&
+                symbolicObject.TypeName == method.DeclaringType && method.Name.StartsWith("set_", StringComparison.Ordinal) && arguments.Length == 1)
+            {
+                SymbolicValue value = CoerceValue(arguments[0], method.ParameterTypes.Length == 0 ? string.Empty : method.ParameterTypes[0]);
+                symbolicObject.Properties[method.Name.Substring(4)] = value.Clone();
+                instance.Resolved = symbolicObject.IsResolved;
                 return;
             }
 
@@ -486,6 +587,25 @@ namespace Dumplings.MicaSetup
                 if (requested.Resolved && requested.Value == null) { result.UseElevated = null; }
                 else if (value.HasValue) { result.UseElevated = value.Value; }
                 else { result.Warnings.Add("The MicaSetup UseElevated argument could not be resolved statically."); }
+            }
+
+            if (method.Name == "UseTempPathFork" && method.DeclaringType.StartsWith("MicaSetup.", StringComparison.Ordinal))
+            {
+                // Extension-method argument zero is the host builder. Older releases expose no
+                // Boolean parameter and therefore mean enabled; newer releases append the flag.
+                SymbolicValue requested = arguments.Length > 1 ? arguments[arguments.Length - 1] : SymbolicValue.Constant(1);
+                bool? value = ToBoolean(requested);
+                if (value.HasValue) { result.UseTempPathFork = value.Value; }
+                else { result.Warnings.Add("The MicaSetup UseTempPathFork argument could not be resolved statically."); }
+            }
+
+            if (method.Name == "UseSingleInstance" && method.DeclaringType.StartsWith("MicaSetup.", StringComparison.Ordinal) && arguments.Length > 0)
+            {
+                // The source-defined extension signature is (builder, instanceName, callback).
+                // A one-argument static test/fork still places the name at argument zero.
+                SymbolicValue requested = arguments.Length > 1 ? arguments[1] : arguments[0];
+                if (requested.Resolved && requested.Value is string) { result.SingleInstanceMutex = (string)requested.Value; }
+                else { result.Warnings.Add("The MicaSetup UseSingleInstance name could not be resolved statically."); }
             }
 
             // MicaSetup forks can add arbitrary C# around the generated host builder. Preserve only direct,
@@ -520,11 +640,14 @@ namespace Dumplings.MicaSetup
 
         private static bool IsMicaSetupConfigurationType(string typeName)
         {
-            return typeName == "MicaSetup.Option" || typeName == "MicaSetup.Core.Pack";
+            return typeName == "MicaSetup.Option" || typeName == "MicaSetup.Core.Option" || typeName == "MicaSetup.Core.Pack";
         }
 
         private static string NormalizeConfigurationProperty(string typeName, string propertyName)
         {
+            // MicaSetup 1.1 shipped this misspelling in both Option and generated hosts. Treat it
+            // as the later corrected property so historical autorun evidence is not discarded.
+            if (propertyName == "IsCrateAsAutoRun") { return "IsCreateAsAutoRun"; }
             if (typeName != "MicaSetup.Core.Pack") { return propertyName; }
             switch (propertyName)
             {
@@ -557,6 +680,10 @@ namespace Dumplings.MicaSetup
                 catch (FormatException) { return SymbolicValue.Unknown("String.Format"); }
             }
             if (method.DeclaringType.StartsWith("System.Array", StringComparison.Ordinal) && method.Name == "Empty") { return SymbolicValue.Array(0); }
+            if (isNewObject && method.DeclaringType == "MicaSetup.Helper.CloseApplicationInfo" && arguments.Length == 0)
+            {
+                return SymbolicValue.Object(method.DeclaringType);
+            }
             if (isNewObject) { return SymbolicValue.Unknown("new " + method.DeclaringType); }
             if (!IsVoid(method.ReturnType)) { return SymbolicValue.Unknown(method.DeclaringType + "." + method.Name + "()"); }
             return SymbolicValue.Unknown("void");
@@ -564,15 +691,26 @@ namespace Dumplings.MicaSetup
 
         private static void ReadWpfResources(Stream stream, PEReader peReader, MetadataReader reader, MicaSetupManagedInfo result, int maximumResources)
         {
+            ManifestResourceHandle[] embeddedWpfResources = reader.ManifestResources
+                .Where(handle =>
+                {
+                    ManifestResource resource = reader.GetManifestResource(handle);
+                    return resource.Implementation.IsNil && reader.GetString(resource.Name).EndsWith(".g.resources", StringComparison.OrdinalIgnoreCase);
+                })
+                .ToArray();
+            if (embeddedWpfResources.Length == 0) { return; }
+
             DirectoryEntry directory = peReader.PEHeaders.CorHeader.ResourcesDirectory;
+            if (directory.RelativeVirtualAddress == 0 || directory.Size == 0)
+            {
+                throw new InvalidDataException("The CLR metadata references WPF resources but the managed resource directory is absent.");
+            }
             long resourceDirectoryOffset = RvaToFileOffset(peReader.PEHeaders, directory.RelativeVirtualAddress);
             int parsedResourceCount = 0;
-            foreach (ManifestResourceHandle handle in reader.ManifestResources)
+            foreach (ManifestResourceHandle handle in embeddedWpfResources)
             {
                 ManifestResource resource = reader.GetManifestResource(handle);
-                if (!resource.Implementation.IsNil) { continue; }
                 string name = reader.GetString(resource.Name);
-                if (!name.EndsWith(".g.resources", StringComparison.OrdinalIgnoreCase)) { continue; }
                 long lengthOffset = CheckedRange(resourceDirectoryOffset, resource.Offset, 4, stream.Length);
                 stream.Position = lengthOffset;
                 uint length = ReadUInt32(stream);
@@ -902,12 +1040,48 @@ namespace Dumplings.MicaSetup
 
         private static SymbolicValue CoerceValue(SymbolicValue value, string parameterType)
         {
+            if (value.Value is SymbolicArray symbolicArray)
+            {
+                if (!symbolicArray.IsResolved) { return value; }
+                object[] items = symbolicArray.Items.Select(ToPublicValue).ToArray();
+                SymbolicValue resolvedArray;
+                if (parameterType == "System.String[]")
+                {
+                    if (items.Any(item => item != null && !(item is string))) { return value; }
+                    resolvedArray = SymbolicValue.Constant(items.Select(item => (string)item).ToArray(), value.Expression);
+                }
+                else
+                {
+                    resolvedArray = SymbolicValue.Constant(items, value.Expression);
+                }
+                resolvedArray.ArrayLength = symbolicArray.Items.Length;
+                return resolvedArray;
+            }
             if (!value.Resolved) { return value; }
             if ((parameterType == "System.Boolean" || parameterType.Contains("Boolean")) && value.Value is int integer)
             {
                 return SymbolicValue.Constant(integer != 0, value.Expression);
             }
             return value;
+        }
+
+        private static object ToPublicValue(SymbolicValue value)
+        {
+            if (value == null || !value.FullyResolved) { return null; }
+            if (value.Value is SymbolicObject symbolicObject)
+            {
+                Dictionary<string, object> properties = new Dictionary<string, object>(StringComparer.Ordinal);
+                foreach (KeyValuePair<string, SymbolicValue> property in symbolicObject.Properties)
+                {
+                    properties[property.Key] = ToPublicValue(property.Value);
+                }
+                return properties;
+            }
+            if (value.Value is SymbolicArray symbolicArray)
+            {
+                return symbolicArray.Items.Select(ToPublicValue).ToArray();
+            }
+            return value.Value;
         }
 
         private static bool? ToBoolean(SymbolicValue value)

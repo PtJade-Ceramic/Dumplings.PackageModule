@@ -18,6 +18,7 @@ BeforeDiscovery {
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Installers\Burn.psm1') -Force
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Installers\NSIS.psm1') -Force
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Installers\Inno.psm1') -Force
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Installers\DotNetInstaller.psm1') -Force
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Installers\AdvancedInstaller.psm1') -Force
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Installers\InstallShield.psm1') -Force
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Installers\ChromiumSetup.psm1') -Force

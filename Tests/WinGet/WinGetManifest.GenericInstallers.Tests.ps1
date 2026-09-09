@@ -31,6 +31,89 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
       $Result.Diagnostics.Id | Should -Not -Contain 'WinGetManifestUpdate.GenericExe.MetadataUpdateFailed'
     }
 
+    It 'Selects dotNetInstaller nested MSI metadata by installer architecture and locale' {
+      $DotNetInfo = [pscustomobject]@{
+        NestedInstallerInfos = @(
+          [pscustomobject]@{
+            RelativePath               = 'payload-x86.msi'
+            ProductCode                = '{X86}'
+            WritesAppsAndFeaturesEntry = $true
+            Occurrences                = @([pscustomobject]@{
+                ConfigurationArchitectureFilter = 'x86'
+                ComponentArchitectureFilter     = ''
+                ConfigurationLcidFilter         = '1033'
+                ComponentLcidFilter             = ''
+              })
+          },
+          [pscustomobject]@{
+            RelativePath               = 'payload-x64.msi'
+            ProductCode                = '{X64}'
+            WritesAppsAndFeaturesEntry = $true
+            Occurrences                = @([pscustomobject]@{
+                ConfigurationArchitectureFilter = 'x64'
+                ComponentArchitectureFilter     = ''
+                ConfigurationLcidFilter         = '1033'
+                ComponentLcidFilter             = ''
+              })
+          }
+        )
+        Diagnostics          = @()
+      }
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{
+          ParserResults = @([pscustomobject]@{
+              Name    = 'dotNetInstaller'
+              Success = $true
+              Result  = [pscustomobject]@{ Family = 'dotNetInstaller'; Metadata = $DotNetInfo }
+            })
+          Diagnostics   = @()
+        }
+      }
+
+      $Result = Get-WinGetGenericInstallerManifestInfo -Path $Script:InstallerPath -Architecture x64 -InstallerLocale en-US -Logger $Script:Logger
+
+      $Result.InputObject[0].ProductCode | Should -Be '{X64}'
+      $Result.SelectedMsiPath | Should -Be 'payload-x64.msi'
+      $Result.SelectionMethod | Should -Be 'ConfigurationFilter'
+    }
+
+    It 'Does not project a hidden dotNetInstaller MSI as visible ARP identity' {
+      $DotNetInfo = [pscustomobject]@{
+        NestedInstallerInfos = @([pscustomobject]@{
+            RelativePath               = 'hidden.msi'
+            ProductCode                = '{HIDDEN}'
+            WritesAppsAndFeaturesEntry = $false
+            Occurrences                = @([pscustomobject]@{
+                ConfigurationArchitectureFilter = ''
+                ComponentArchitectureFilter     = ''
+                ConfigurationLcidFilter         = ''
+                ComponentLcidFilter             = ''
+              })
+          })
+        Diagnostics          = @()
+      }
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{
+          ParserResults = @([pscustomobject]@{
+              Name    = 'dotNetInstaller'
+              Success = $true
+              Result  = [pscustomobject]@{ Family = 'dotNetInstaller'; Metadata = $DotNetInfo }
+            })
+          Diagnostics   = @()
+        }
+      }
+
+      $Result = Get-WinGetGenericInstallerManifestInfo -Path $Script:InstallerPath -Architecture x64 -Logger $Script:Logger
+
+      $Result.SelectedMsiPath | Should -BeNullOrEmpty
+      $Result.Diagnostics.Id | Should -Contain 'DotNetInstaller.NestedMsi.ArpVisibility.hidden'
+      $ProductCodes = @($Result.InputObject | ForEach-Object {
+          $Property = $_.PSObject.Properties['ProductCode']
+          if ($null -ne $Property) { $Property.Value }
+        })
+      $ProductCodes | Should -Not -Contain '{HIDDEN}'
+    }
+
     It 'Updates generic EXE metadata from a detected Advanced Installer parser result' {
       Mock Get-WinGetInstallerAnalysis {
         [pscustomobject]@{

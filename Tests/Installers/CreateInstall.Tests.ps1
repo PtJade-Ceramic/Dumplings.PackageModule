@@ -64,6 +64,85 @@ BeforeAll {
     } finally { $Writer.Dispose() }
     [IO.File]::WriteAllBytes($Path, $Output.ToArray())
   }
+
+  function New-TestCreateInstallMultiVolumeFixture {
+    param(
+      [Parameter(Mandatory)][string]$Path,
+      [Parameter(Mandatory)][string]$CompanionPath
+    )
+
+    $Content = [Text.Encoding]::UTF8.GetBytes('split CreateInstall payload')
+    $Block = [IO.MemoryStream]::new()
+    $BlockWriter = [IO.BinaryWriter]::new($Block, [Text.Encoding]::UTF8, $true)
+    try {
+      $BlockWriter.Write([byte]0x80)
+      $BlockWriter.Write([uint64]$Content.Length)
+      $BlockWriter.Write($Content)
+    } finally { $BlockWriter.Dispose() }
+    $BlockBytes = $Block.ToArray()
+    $Block.Dispose()
+
+    $MetadataStream = [IO.MemoryStream]::new()
+    $MetadataWriter = [IO.BinaryWriter]::new($MetadataStream, [Text.Encoding]::UTF8, $true)
+    try {
+      $MetadataWriter.Write([uint16]0)
+      $MetadataWriter.Write([long]0)
+      $MetadataWriter.Write([uint64]$Content.Length)
+      $MetadataWriter.Write([uint64]$BlockBytes.Length)
+      $MetadataWriter.Write([uint32]((Get-BinaryCrc32 -Bytes $Content) -bxor [uint32]::MaxValue))
+      $MetadataWriter.Write([Text.Encoding]::UTF8.GetBytes('split.txt'))
+      $MetadataWriter.Write([byte]0)
+    } finally { $MetadataWriter.Dispose() }
+    $Metadata = $MetadataStream.ToArray()
+    $MetadataStream.Dispose()
+
+    $Pattern = 'disk%02i.gea'
+    $HeaderSize = 73 + [Text.Encoding]::UTF8.GetByteCount($Pattern) + 1 + $Metadata.Length
+    $MainDataLength = 5
+    $ArchiveFileSize = $HeaderSize + $MainDataLength
+    $LastVolumeSize = 10 + $BlockBytes.Length - $MainDataLength
+    $UniqueId = [uint32]0x13572468
+
+    $Output = [IO.MemoryStream]::new()
+    $Writer = [IO.BinaryWriter]::new($Output, [Text.Encoding]::UTF8, $true)
+    try {
+      $Writer.Write([Text.Encoding]::ASCII.GetBytes("GEA`0"))
+      $Writer.Write([uint16]0)
+      $Writer.Write($UniqueId)
+      $Writer.Write([byte]2)
+      $Writer.Write([byte]0)
+      $Writer.Write([long]0)
+      $Writer.Write([uint32]0)
+      $Writer.Write([uint16]2)
+      $Writer.Write([uint32]$HeaderSize)
+      $Writer.Write([long]$BlockBytes.Length)
+      $Writer.Write([uint32]$Metadata.Length)
+      $Writer.Write([long]$ArchiveFileSize)
+      $Writer.Write([long]$LastVolumeSize)
+      $Writer.Write([long]$LastVolumeSize)
+      $Writer.Write([uint32]0)
+      $Writer.Write([byte]8)
+      $Writer.Write([byte]1)
+      $Writer.Write([byte]1)
+      $Writer.Write([Text.Encoding]::UTF8.GetBytes($Pattern))
+      $Writer.Write([byte]0)
+      $Writer.Write($Metadata)
+      $Writer.Write($BlockBytes, 0, $MainDataLength)
+    } finally { $Writer.Dispose() }
+    [IO.File]::WriteAllBytes($Path, $Output.ToArray())
+    $Output.Dispose()
+
+    $Companion = [IO.MemoryStream]::new()
+    $CompanionWriter = [IO.BinaryWriter]::new($Companion, [Text.Encoding]::UTF8, $true)
+    try {
+      $CompanionWriter.Write([Text.Encoding]::ASCII.GetBytes("GEA`0"))
+      $CompanionWriter.Write([uint16]1)
+      $CompanionWriter.Write($UniqueId)
+      $CompanionWriter.Write($BlockBytes, $MainDataLength, $BlockBytes.Length - $MainDataLength)
+    } finally { $CompanionWriter.Dispose() }
+    [IO.File]::WriteAllBytes($CompanionPath, $Companion.ToArray())
+    $Companion.Dispose()
+  }
 }
 
 Describe 'CreateInstall static parser' {
@@ -118,6 +197,48 @@ Describe 'CreateInstall static parser' {
     }
   }
 
+  It 'Should preserve metadata and safely stream a split GEA volume set' {
+    $FixturePath = Join-Path $Script:FixtureDirectory 'split-main.gea'
+    $CompanionPath = Join-Path $Script:FixtureDirectory 'disk02.gea'
+    $DestinationPath = Join-Path $Script:FixtureDirectory 'split-expanded'
+    New-TestCreateInstallMultiVolumeFixture -Path $FixturePath -CompanionPath $CompanionPath
+
+    InModuleScope CreateInstall -Parameters @{ FixturePath = $FixturePath; CompanionPath = $CompanionPath; DestinationPath = $DestinationPath } {
+      param($FixturePath, $CompanionPath, $DestinationPath)
+      Mock Get-PERequestedExecutionLevel { $null }
+
+      $Layout = Get-CreateInstallArchiveLayout -Path $FixturePath
+      $Layout.VolumeCount | Should -Be 2
+      $Layout.AllVolumesAvailable | Should -BeTrue
+      $Layout.DataSegments | Should -HaveCount 2
+      $Layout.VolumeFiles[1].VolumeNumber | Should -Be 1
+      $Files = @(Expand-CreateInstallInstaller -Path $FixturePath -DestinationPath $DestinationPath -CollisionAction Error)
+      Get-Content -LiteralPath $Files[0].FullName -Raw | Should -Be 'split CreateInstall payload'
+
+      Remove-Item -LiteralPath $CompanionPath -Force
+      $Info = Get-CreateInstallInfo -Path $FixturePath
+      $Info.GEA.AllVolumesAvailable | Should -BeFalse
+      $Info.GEA.MissingVolumes | Should -HaveCount 1
+      $Info.CanExpand | Should -BeFalse
+      $Info.Diagnostics.Id | Should -Contain 'CreateInstall.Archive.VolumeMissing'
+      { Expand-CreateInstallInstaller -Path $FixturePath -DestinationPath $DestinationPath -CollisionAction Error } | Should -Throw '*companion volume*unavailable*'
+    }
+  }
+
+  It 'Should reject companion volumes from another GEA archive' {
+    $FixturePath = Join-Path $Script:FixtureDirectory 'split-integrity-main.gea'
+    $CompanionPath = Join-Path $Script:FixtureDirectory 'disk02.gea'
+    New-TestCreateInstallMultiVolumeFixture -Path $FixturePath -CompanionPath $CompanionPath
+    $Bytes = [IO.File]::ReadAllBytes($CompanionPath)
+    $Bytes[6] = $Bytes[6] -bxor 0xFF
+    [IO.File]::WriteAllBytes($CompanionPath, $Bytes)
+
+    InModuleScope CreateInstall -Parameters @{ FixturePath = $FixturePath } {
+      param($FixturePath)
+      { Get-CreateInstallArchiveLayout -Path $FixturePath } | Should -Throw '*does not belong to this archive*'
+    }
+  }
+
   It 'Should classify official CreateInstall <Version> media through structural archive and ARP profiles' -ForEach @(
     @{ Version = '5.9.0'; FixtureName = 'CreateInstall.Builder.5.9.0.exe'; Sha256 = '0FA71D24ED44035B15055A5356CD76BD76D43A16EC136A65F82B00928E91AB15'; ArchiveProfile = 'GEA1'; AddRemoveProfile = 'Legacy3'; ProductCode = 'CreateInstall'; EntryCount = 431; WritesNoModify = $false }
     @{ Version = '5.19.1'; FixtureName = 'CreateInstall.Builder.5.19.1.exe'; Sha256 = 'DA515094D2A287CB402FA5B2B551BF668498A24BBC20C543D3E415799E15B06E'; ArchiveProfile = 'GEA1'; AddRemoveProfile = 'Legacy3'; ProductCode = 'CreateInstall'; EntryCount = 596; WritesNoModify = $false }
@@ -146,6 +267,8 @@ Describe 'CreateInstall static parser' {
     $Info.GenteeProgram.VersionMajor | Should -Be 4
     $Info.GenteeProgram.VersionMinor | Should -Be 0
     $Info.GenteeProgram.AddRemoveProfile | Should -Be $AddRemoveProfile
+    $Info.InstallGroupRoute | Should -Be ($Version -eq '5.9.0' ? 'Direct5' : 'Extended6')
+    $Info.InstalledFiles | Should -HaveCount $EntryCount
     $Info.ProductCode | Should -Be $ProductCode
     $Info.Scope | Should -Be 'machine'
     $Info.UninstallRegistrations | Should -HaveCount 1
@@ -176,6 +299,178 @@ Describe 'CreateInstall static parser' {
       $Evidence.AppsAndFeaturesEntries | Should -HaveCount 1
       $Evidence.Entries | Should -HaveCount 2
       $Evidence.Diagnostics.Id | Should -Be @('CreateInstall.ARP.Hidden')
+    }
+  }
+
+  It 'Should recover source-backed system operations from stripped Gentee routines' {
+    InModuleScope CreateInstall {
+      $ListStream = [IO.MemoryStream]::new()
+      $ListWriter = [IO.BinaryWriter]::new($ListStream, [Text.Encoding]::UTF8, $true)
+      function Add-TestList {
+        param([string[][]]$Rows)
+        $Offset = [uint32]$ListStream.Position
+        $ListWriter.Write([uint32]$Rows.Count)
+        foreach ($Row in $Rows) {
+          foreach ($Value in $Row) {
+            $ListWriter.Write([Text.Encoding]::UTF8.GetBytes($Value))
+            $ListWriter.Write([byte]0)
+          }
+        }
+        return $Offset
+      }
+      $EnvironmentOffset = Add-TestList -Rows (, [string[]]@('DUMPLINGS_CREATEINSTALL', '#setuppath#', '2', '', 'environment evidence'))
+      $FontOffset = Add-TestList -Rows (, [string[]]@('#fontpath#', 'evidence.ttf', 'Evidence Font', '1', '', 'font evidence'))
+      $ComOffset = Add-TestList -Rows (, [string[]]@('#setuppath#', 'evidence.dll', '1', '', 'comresult', 'COM evidence'))
+      $DotNetOffset = Add-TestList -Rows (, [string[]]@('#setuppath#', 'evidence.net.dll', '4', '/tlb', '', '.NET evidence'))
+      $ListWriter.Dispose()
+      $ListBytes = $ListStream.ToArray()
+      $ListStream.Dispose()
+
+      function New-TestCommand {
+        param([uint32]$Command, [object]$Operand, [int]$Index)
+        [pscustomobject]@{ Command = $Command; Operand = $Operand; Index = $Index; Offset = 0x1000 + $Index }
+      }
+      function New-TestFunction {
+        param([uint32]$Id, [uint32]$ParameterCount, [string]$LiteralText, [object[]]$Commands, [int]$Size = 256, [string[]]$StringLiterals = @(), [object[]]$ExternalCalls = @())
+        [pscustomobject]@{ Record = [pscustomobject]@{ Id = $Id; Name = ''; Size = $Size; Offset = $Id; PayloadOffset = 0; EndOffset = 0 }; ParameterCount = $ParameterCount; LiteralText = $LiteralText; Commands = @($Commands); StringLiterals = $StringLiterals; ExternalCalls = $ExternalCalls }
+      }
+
+      $CallerCommands = [Collections.Generic.List[object]]::new()
+      $AddCommand = { param([uint32]$Command, [object]$Operand) $CallerCommands.Add((New-TestCommand -Command $Command -Operand $Operand -Index $CallerCommands.Count)) }
+      & $AddCommand 25 $EnvironmentOffset; & $AddCommand 100 $null
+      & $AddCommand 34 'PATH'; & $AddCommand 34 '#setuppath#\bin'; & $AddCommand 25 ([uint32]3); & $AddCommand 34 ''; & $AddCommand 101 $null
+      foreach ($Value in @('x64', '00000101', 'or', 'checkret', 'Visual C++ is required', '')) { & $AddCommand 34 $Value }; & $AddCommand 120 $null
+      foreach ($Value in @('#setuppath#', 'service.exe', 'DumplingsService', 'Dumplings Service', 'Parser evidence service')) { & $AddCommand 34 $Value }
+      & $AddCommand 25 ([uint32]3); & $AddCommand 25 ([uint32]1); & $AddCommand 34 ''; & $AddCommand 111 $null
+      & $AddCommand 25 $FontOffset; & $AddCommand 130 $null
+      & $AddCommand 25 $ComOffset; & $AddCommand 131 $null
+      & $AddCommand 25 $DotNetOffset; & $AddCommand 132 $null
+
+      $Functions = [Collections.Generic.Dictionary[uint32, object]]::new()
+      $Functions[100] = New-TestFunction 100 1 'Environment'
+      $Functions[101] = New-TestFunction 101 4 'Environment g_append'
+      $Functions[110] = New-TestFunction 110 6 'System\CurrentControlSet\Services\'
+      $Functions[111] = New-TestFunction 111 7 '' @((New-TestCommand 110 $null 0))
+      $Functions[120] = New-TestFunction 120 6 'SOFTWARE\Classes\Installer\Products\ RuntimeMinimum'
+      $Functions[130] = New-TestFunction 130 1 'Software\Microsoft\Windows NT\CurrentVersion\Fonts'
+      $Functions[131] = New-TestFunction 131 1 '#syspath#\regsvr32.exe /s isdllok'
+      $Functions[132] = New-TestFunction 132 1 'RegAsm.exe /s /codebase'
+      $Functions[200] = New-TestFunction 200 0 '' $CallerCommands.ToArray() 4096
+      $Program = [pscustomobject]@{ FunctionIndex = $Functions }
+      $Project = [pscustomobject]@{ Variables = [ordered]@{ setuppath = '#progfiles#\Evidence' }; BufferData = $ListBytes }
+
+      $Environment = Get-CreateInstallEnvironmentEvidence -Program $Program -ProjectVariableEvidence $Project -Is32Bit $true
+      $Prerequisite = Get-CreateInstallPrerequisiteEvidence -Program $Program -ProjectVariableEvidence $Project -Is32Bit $true
+      $Service = Get-CreateInstallServiceEvidence -Program $Program -ProjectVariableEvidence $Project -Is32Bit $true
+      $Registration = Get-CreateInstallRegistrationEvidence -Program $Program -ProjectVariableEvidence $Project -Is32Bit $true
+
+      $Environment.EnvironmentChanges | Should -HaveCount 2
+      ($Environment.EnvironmentChanges | Where-Object Operation -EQ Set).Value | Should -Be '%ProgramFiles(x86)%\Evidence'
+      ($Environment.EnvironmentChanges | Where-Object Operation -EQ AppendOrRemove).Scope | Should -Be 'both'
+      $Environment.Diagnostics.Id | Should -Contain 'CreateInstall.Environment.AppendDeleteAmbiguous'
+      $Prerequisite.PrerequisiteChecks | Should -HaveCount 1
+      $Prerequisite.PrerequisiteChecks[0].Versions | Should -Be @('2015', '2019')
+      $Prerequisite.PrerequisiteChecks[0].Architecture | Should -Be 'x64'
+      $Prerequisite.PrerequisiteChecks[0].PackageDependencyCandidates | Should -Be @('Microsoft.VCRedist.2015+.x64')
+      $Service.Services | Should -HaveCount 1
+      $Service.Services[0].BinaryPath | Should -Be '%ProgramFiles(x86)%\Evidence\service.exe'
+      $Service.Services[0].StartType | Should -Be 'Manual'
+      $Service.Services[0].StartAfterInstall | Should -BeFalse
+      $Registration.Registrations | Should -HaveCount 3
+      $Registration.Registrations.Kind | Should -Be @('Font', 'Com', 'DotNetAssembly')
+      ($Registration.Registrations | Where-Object Kind -EQ DotNetAssembly).Framework | Should -Be '.NET Framework 4.x x64'
+    }
+  }
+
+  It 'Should recover source-backed file, download, task, service, archive, and INI operations' {
+    InModuleScope CreateInstall {
+      $ListStream = [IO.MemoryStream]::new()
+      $ListWriter = [IO.BinaryWriter]::new($ListStream, [Text.Encoding]::UTF8, $true)
+      function Add-OperationList {
+        param([string[][]]$Rows)
+        $Offset = [uint32]$ListStream.Position
+        $ListWriter.Write([uint32]$Rows.Count)
+        foreach ($Row in $Rows) { foreach ($Value in $Row) { $ListWriter.Write([Text.Encoding]::UTF8.GetBytes($Value)); $ListWriter.Write([byte]0) } }
+        return $Offset
+      }
+      $CopyOffset = Add-OperationList -Rows (, [string[]]@('#exepath#', 'source.dat', '#setuppath#', 'copied.dat', '1', '', 'copy'))
+      $DownloadOffset = Add-OperationList -Rows (, [string[]]@('payload.bin', '#setuppath#', 'cache', '', '1', '', 'downloadResult', 'download'))
+      $IniSetOffset = Add-OperationList -Rows (, [string[]]@('Theme', 'Dark', '', '0', 'setting'))
+      $IniDeleteOffset = Add-OperationList -Rows (, [string[]]@('Legacy', '', 'delete'))
+      $ListWriter.Dispose()
+      $ListBytes = $ListStream.ToArray()
+      $ListStream.Dispose()
+
+      function New-OperationCommand {
+        param([uint32]$Command, [object]$Operand, [int]$Index)
+        [pscustomobject]@{ Command = $Command; Operand = $Operand; Index = $Index; Offset = 0x4000 + $Index }
+      }
+      function New-OperationFunction {
+        param([uint32]$Id, [uint32]$ParameterCount, [string[]]$StringLiterals = @(), [string[]]$ExternalNames = @(), [object[]]$Commands = @())
+        $ExternalCalls = @($ExternalNames | ForEach-Object { [pscustomobject]@{ Name = $_; Library = 'fixture.dll' } })
+        [pscustomobject]@{ Record = [pscustomobject]@{ Id = $Id; Name = ''; Size = 256; Offset = $Id; PayloadOffset = 0; EndOffset = 0 }; ParameterCount = $ParameterCount; LiteralText = $StringLiterals -join ' '; StringLiterals = $StringLiterals; ExternalCalls = $ExternalCalls; Commands = @($Commands) }
+      }
+      $CallerCommands = [Collections.Generic.List[object]]::new()
+      $AddCommand = { param([uint32]$Command, [object]$Operand) $CallerCommands.Add((New-OperationCommand -Command $Command -Operand $Operand -Index $CallerCommands.Count)) }
+
+      foreach ($Value in @('#username#', 'Evidence Task', '#setuppath#', 'task.exe', '--run', '#setuppath#', 'work', 'Task comment')) { & $AddCommand 34 $Value }
+      & $AddCommand 25 ([uint32]1)
+      foreach ($Value in @('+2', '1', '', '')) { & $AddCommand 34 $Value }
+      & $AddCommand 300 $null
+      & $AddCommand 34 'Old Task'; & $AddCommand 34 ''; & $AddCommand 301 $null
+      foreach ($Value in @('#exepath#', 'source.dat', '#setuppath#', 'direct.dat')) { & $AddCommand 34 $Value }
+      & $AddCommand 25 ([uint32]1); & $AddCommand 25 ([uint32]3); & $AddCommand 34 ''; & $AddCommand 302 $null
+      & $AddCommand 25 $CopyOffset; & $AddCommand 303 $null
+      & $AddCommand 34 'https://downloads.example.test/base'; & $AddCommand 25 $DownloadOffset; & $AddCommand 25 ([uint32]1); & $AddCommand 304 $null
+      foreach ($Value in @('#setuppath#', 'payload.7z', '#setuppath#', 'seven', '', '*.exe', '*.pdb')) { & $AddCommand 34 $Value }
+      & $AddCommand 25 ([uint32]2); & $AddCommand 305 $null
+      foreach ($Value in @('#setuppath#', 'payload.cab', '#setuppath#', 'cabinet', '', '*.*')) { & $AddCommand 34 $Value }
+      & $AddCommand 25 ([uint32]2); & $AddCommand 306 $null
+      foreach ($Value in @('#setuppath#', 'payload.zip', '#setuppath#', 'zip', '')) { & $AddCommand 34 $Value }
+      & $AddCommand 25 ([uint32]516); & $AddCommand 307 $null
+      foreach ($Value in @('#setuppath#', 'settings.ini', 'General')) { & $AddCommand 34 $Value }
+      & $AddCommand 25 $IniSetOffset; & $AddCommand 25 ([uint32]1); & $AddCommand 25 ([uint32]1); & $AddCommand 308 $null
+      foreach ($Value in @('#setuppath#', 'settings.ini', 'General')) { & $AddCommand 34 $Value }
+      & $AddCommand 25 $IniDeleteOffset; & $AddCommand 25 ([uint32]1); & $AddCommand 25 ([uint32]1); & $AddCommand 309 $null
+      & $AddCommand 34 ''; & $AddCommand 34 'EvidenceService'; & $AddCommand 310 $null
+      & $AddCommand 34 ''; & $AddCommand 34 'EvidenceService'; & $AddCommand 311 $null
+      & $AddCommand 34 ''; & $AddCommand 34 'EvidenceService'; & $AddCommand 312 $null
+
+      $Functions = [Collections.Generic.Dictionary[uint32, object]]::new()
+      $Functions[300] = New-OperationFunction -Id 300 -ParameterCount 11 -ExternalNames newtask
+      $Functions[301] = New-OperationFunction -Id 301 -ParameterCount 2 -ExternalNames deltask
+      $Functions[302] = New-OperationFunction -Id 302 -ParameterCount 5 -StringLiterals @('errdir', 'errfile', 'ginst_dir', 'ginst_file')
+      $Functions[303] = New-OperationFunction -Id 303 -ParameterCount 1 -StringLiterals reboot
+      $Functions[304] = New-OperationFunction -Id 304 -ParameterCount 3 -StringLiterals @('#download#', 'dwn_progsize', 'Pdownloads')
+      $Functions[305] = New-OperationFunction -Id 305 -ParameterCount 6 -StringLiterals @('result7z', 'Decompressing error while reading archive')
+      $Functions[306] = New-OperationFunction -Id 306 -ParameterCount 5 -StringLiterals @('input is not a cabinet archive!', 'ginst_dir', 'ginst_file')
+      $Functions[307] = New-OperationFunction -Id 307 -ParameterCount 4 -StringLiterals @('decompzip.vbs', 'Shell.Application')
+      $Functions[308] = New-OperationFunction -Id 308 -ParameterCount 5 -ExternalNames @('GetPrivateProfileStringW', 'WritePrivateProfileStringW')
+      $Functions[309] = New-OperationFunction -Id 309 -ParameterCount 5 -ExternalNames WritePrivateProfileStringW
+      $Functions[310] = New-OperationFunction -Id 310 -ParameterCount 1 -ExternalNames StartServiceW
+      $Functions[311] = New-OperationFunction -Id 311 -ParameterCount 1 -ExternalNames ControlService
+      $Functions[312] = New-OperationFunction -Id 312 -ParameterCount 1 -ExternalNames DeleteService
+      $Functions[400] = New-OperationFunction -Id 400 -ParameterCount 0 -Commands ($CallerCommands.ToArray())
+      $Program = [pscustomobject]@{ FunctionIndex = $Functions }
+      $Project = [pscustomobject]@{ Variables = [ordered]@{ setuppath = '#progfiles#\Evidence'; exepath = 'C:\Setup'; username = 'FixtureUser' }; BufferData = $ListBytes }
+
+      $Tasks = Get-CreateInstallScheduledTaskEvidence -Program $Program -ProjectVariableEvidence $Project -Is32Bit $true
+      $Files = Get-CreateInstallFileOperationEvidence -Program $Program -ProjectVariableEvidence $Project -Is32Bit $true
+      $Downloads = Get-CreateInstallDownloadEvidence -Program $Program -ProjectVariableEvidence $Project -Is32Bit $true
+      $Archives = Get-CreateInstallArchiveOperationEvidence -Program $Program -ProjectVariableEvidence $Project -Is32Bit $true
+      $Configuration = Get-CreateInstallConfigurationEvidence -Program $Program -ProjectVariableEvidence $Project -Is32Bit $true
+      $Services = Get-CreateInstallServiceEvidence -Program $Program -ProjectVariableEvidence $Project -Is32Bit $true
+
+      $Tasks.ScheduledTasks.Operation | Should -Be @('Create', 'Delete')
+      $Tasks.ScheduledTasks[0].Executable | Should -Be '%ProgramFiles(x86)%\Evidence\task.exe'
+      $Files.FileOperations.Route | Should -Be @('Direct', 'List')
+      $Files.FileOperations[1].Destination | Should -Be '%ProgramFiles(x86)%\Evidence\copied.dat'
+      $Downloads.Downloads[0].Url | Should -Be 'https://downloads.example.test/base/payload.bin'
+      $Downloads.Downloads[0].Destination | Should -Be '%ProgramFiles(x86)%\Evidence\cache\payload.bin'
+      $Archives.ArchiveOperations.Format | Should -Be @('7z', 'Cabinet', 'ZIP')
+      $Configuration.ConfigurationChanges.Operation | Should -Be @('Set', 'Delete')
+      $Configuration.ConfigurationChanges[0].FilePath | Should -Be '%ProgramFiles(x86)%\Evidence\settings.ini'
+      $Services.Services.Operation | Should -Be @('Start', 'Stop', 'Delete')
     }
   }
 
@@ -225,11 +520,17 @@ Describe 'CreateInstall static parser' {
     $Info.PayloadAnalysisFiles | Should -Contain '%ProgramFiles(x86)%\Balabolka\balabolka.exe'
     $Info.PayloadDependencyInfo.RecommendedPackageDependencyIds | Should -Contain 'Microsoft.VCRedist.2015+.x86'
     $Info.GEA.UnsupportedCompressionMethods | Should -Not -Contain 'PPMd'
+    $Info.ConfigurationChanges | Should -HaveCount 6
+    @($Info.ConfigurationChanges.FilePath | Sort-Object -Unique) | Should -Be @('%APPDATA%\Balabolka\balabolka.cfg')
+    $Info.ConfigurationChanges.Key | Should -Contain 'MinimizeToTray'
     $Info.CanExpand | Should -BeTrue
     $Info.Diagnostics.Id | Should -Contain 'CreateInstall.InstallGroup.ConditionDynamic'
     $Info.Diagnostics.Id | Should -Contain 'CreateInstall.Shortcut.Conditional'
     $Info.Diagnostics.Id | Should -Contain 'CreateInstall.Run.Conditional'
     $Info.Diagnostics.Id | Should -Contain 'CreateInstall.Registry.Conditional'
+    $Info.PrerequisiteChecks | Should -HaveCount 1
+    $Info.PrerequisiteChecks[0].Versions | Should -Be @('2019')
+    $Info.PrerequisiteChecks[0].PackageDependencyCandidates | Should -Be @('Microsoft.VCRedist.2015+.x86')
     $Info.Diagnostics.Kind | Should -Not -Contain 'Invalid'
     $Expression = @($Info.GenteeExpressions | Where-Object { $_.Operation -eq 'InstallGroup' -and $_.Expression -ceq '@if73_used' })
     $Expression | Should -HaveCount 1
@@ -355,5 +656,36 @@ Describe 'CreateInstall static parser' {
     $Info.CanExpand | Should -BeFalse
     $Info.Diagnostics.Id | Should -Contain 'CreateInstall.Archive.Absent'
     $Info.Diagnostics.Kind | Should -Not -Contain 'Invalid'
+  }
+
+  It 'Should validate the GE header CRC the way the reference ge_load does' {
+    InModuleScope CreateInstall {
+      function New-TestGenteeProgram {
+        param([Nullable[uint32]]$StoredCrc)
+        # One resource record (type 9, GHCOM_PACK set) with four zero payload bytes; the record
+        # size covers its own five-byte prefix, the size byte, and the payload.
+        $Record = [byte[]](9, 0x02, 0, 0, 0, 10) + [byte[]]::new(4)
+        $ProgramSize = 22 + $Record.Length
+        $Bytes = [byte[]]::new($ProgramSize)
+        [Array]::Copy([BitConverter]::GetBytes([uint32]0x00004547), 0, $Bytes, 0, 4)
+        [Array]::Copy([BitConverter]::GetBytes([uint32]22), 0, $Bytes, 12, 4)
+        [Array]::Copy([BitConverter]::GetBytes([uint32]$ProgramSize), 0, $Bytes, 16, 4)
+        $Bytes[20] = 4
+        [Array]::Copy($Record, 0, $Bytes, 22, $Record.Length)
+        # Gentee's crc() seeds 0xFFFFFFFF and applies no final XOR, so invert the standard CRC32.
+        $Actual = if ($null -ne $StoredCrc) { $StoredCrc } else { (Get-BinaryCrc32 -Bytes $Bytes -Offset 12) -bxor [uint32]::MaxValue }
+        [Array]::Copy([BitConverter]::GetBytes([uint32]$Actual), 0, $Bytes, 8, 4)
+        return $Bytes
+      }
+
+      $ValidProgram = New-TestGenteeProgram
+      { Get-CreateInstallGenteeRecord -Bytes $ValidProgram } | Should -Not -Throw
+      $Records = Get-CreateInstallGenteeRecord -Bytes $ValidProgram
+      $Records.Count | Should -Be 1
+      $Records[0].Type | Should -Be 9
+
+      $CorruptProgram = New-TestGenteeProgram -StoredCrc ([uint32]0x12345678)
+      { Get-CreateInstallGenteeRecord -Bytes $CorruptProgram } | Should -Throw '*header CRC*'
+    }
   }
 }

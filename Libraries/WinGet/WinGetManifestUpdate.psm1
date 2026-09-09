@@ -402,6 +402,8 @@ function Get-WinGetGenericInstallerManifestInfo {
     The installer path
   .PARAMETER Architecture
     The architecture of the installer entry
+  .PARAMETER InstallerLocale
+    Optional installer locale used to match dotNetInstaller LCID filters
   .PARAMETER Analysis
     A previously computed installer analysis to reuse instead of re-analyzing the file
   .PARAMETER Logger
@@ -415,6 +417,9 @@ function Get-WinGetGenericInstallerManifestInfo {
     [Parameter(HelpMessage = 'The architecture of the installer entry')]
     [ValidateSet('x86', 'x64', 'arm', 'arm64', 'neutral')]
     [string]$Architecture,
+
+    [AllowNull()][AllowEmptyString()]
+    [string]$InstallerLocale,
 
     [Parameter(HelpMessage = 'A previously computed installer analysis to reuse instead of re-analyzing the file')]
     $Analysis,
@@ -474,6 +479,30 @@ function Get-WinGetGenericInstallerManifestInfo {
       $MsiInfoArguments = @{ Installer = $Metadata }
       if ($Architecture -cin @('x86', 'x64', 'arm64')) { $MsiInfoArguments.Architecture = $Architecture }
       $MsiInfo = Get-AdvancedInstallerMsiInfo @MsiInfoArguments
+    } elseif ($SuccessfulParser.Name -ceq 'dotNetInstaller') {
+      if (-not $Metadata) {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'DotNetInstaller.MetadataUnavailable' -Source 'dotNetInstaller' -Message 'dotNetInstaller detection did not return parser metadata.' -Kind Incomplete -Areas Metadata -AffectedFields ProductCode, AppsAndFeaturesEntries, DefaultInstallLocation))
+        return [pscustomobject]@{ ParserName = 'dotNetInstaller'; InputObject = @(); Diagnostics = $Diagnostics.ToArray() }
+      }
+      $SelectionArguments = @{ Info = $Metadata }
+      if ($Architecture) { $SelectionArguments.Architecture = $Architecture }
+      if ($InstallerLocale) { $SelectionArguments.InstallerLocale = $InstallerLocale }
+      $Selection = Get-DotNetInstallerNestedMsiSelection @SelectionArguments
+      if ($Selection.Status -ceq 'Selected') {
+        $VisibilityProperty = $Selection.Selected.PSObject.Properties['WritesAppsAndFeaturesEntry']
+        $Visibility = $null -eq $VisibilityProperty ? $null : $VisibilityProperty.Value
+        if ($Visibility -eq $true) {
+          $MsiInfo = $Selection.Selected
+        } else {
+          $MsiInfo = $null
+          $VisibilityLabel = $Visibility -eq $false ? 'hidden' : 'unresolved'
+          $Diagnostics.Add((New-InstallerDiagnostic -Id "DotNetInstaller.NestedMsi.ArpVisibility.$VisibilityLabel" -Source 'dotNetInstaller' -Message "The selected dotNetInstaller MSI has $VisibilityLabel Apps & Features visibility; existing ARP-owned fields are preserved." -Kind Incomplete -Areas Metadata -AffectedFields ProductCode, AppsAndFeaturesEntries -Evidence $Selection))
+        }
+      } else {
+        $MsiInfo = $null
+        $Kind = $Selection.Status -ceq 'NoMatch' ? 'Mismatch' : 'Ambiguous'
+        $Diagnostics.Add((New-InstallerDiagnostic -Id "DotNetInstaller.NestedMsi.$($Selection.Status)" -Source 'dotNetInstaller' -Message "dotNetInstaller nested MSI selection was $($Selection.Status.ToLowerInvariant()) for architecture '$Architecture' and locale '$InstallerLocale'; existing MSI-owned fields are preserved." -Kind $Kind -Areas Metadata -AffectedFields ProductCode, AppsAndFeaturesEntries, DefaultInstallLocation -Evidence $Selection))
+      }
     } else {
       # InstallShield and Advanced Installer analyzer actions parse selected
       # nested MSI metadata before their temporary extraction trees are removed.
@@ -487,8 +516,8 @@ function Get-WinGetGenericInstallerManifestInfo {
     return [pscustomobject]@{
       ParserName      = $SuccessfulParser.Name
       InputObject     = @($ParserOutputs)
-      SelectedMsiPath = $null -eq $MsiInfo ? $null : $MsiInfo.SelectedMsiPath
-      SelectionMethod = $null -eq $MsiInfo ? $null : $MsiInfo.SelectionMethod
+      SelectedMsiPath = $null -eq $MsiInfo ? $null : ($MsiInfo.PSObject.Properties['SelectedMsiPath'] ? $MsiInfo.SelectedMsiPath : $MsiInfo.RelativePath)
+      SelectionMethod = $null -eq $MsiInfo ? $null : ($MsiInfo.PSObject.Properties['SelectionMethod'] ? $MsiInfo.SelectionMethod : 'ConfigurationFilter')
       Diagnostics     = @(Merge-InstallerDiagnostics -Diagnostic $Diagnostics.ToArray())
     }
   }
@@ -1089,6 +1118,7 @@ function Update-WinGetInstallerManifestInstallerMetadata {
           Architecture = $Installer.Architecture
           Logger       = $Logger
         }
+        if ($Installer.Contains('InstallerLocale')) { $ParserInfoArguments.InstallerLocale = $Installer.InstallerLocale }
         $ParserInfo = Get-WinGetGenericInstallerManifestInfo @ParserInfoArguments
         if ($ParserInfo) {
           Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($ParserInfo.Diagnostics) -Installer $Installer -InstallerEntry $InstallerEntry
