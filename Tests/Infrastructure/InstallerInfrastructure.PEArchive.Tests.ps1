@@ -18,6 +18,7 @@ Describe 'Get-PEVersionStringTable' {
     try {
       $Layout = Get-PELayout -Stream $Stream
       $Layout.Sections.Count | Should -BeGreaterThan 0
+      $Layout.Sections[0].Characteristics | Should -BeGreaterThan 0
       $Stream.Position | Should -Be 5
     } finally { $Stream.Dispose() }
   }

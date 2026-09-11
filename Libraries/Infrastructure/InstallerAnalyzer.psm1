@@ -284,19 +284,46 @@ function Get-InstallerPortableEvidence {
   $ArchitectureInfo = Get-PEArchitectureInfo -Path $Path -RelatedFile $RelatedPEFiles
   $DependencyInfo = Get-PEDependencyInfo -Path $Path -RelatedFile $RelatedFile
 
-  # Tauri applications retain at least one inexpensive framework literal in
-  # normal generated builds. Gate the complete asset-map scan on those markers
-  # so ordinary portable PEs do not pay the decompression-validation cost.
+  # Gate the complete Tauri asset scan with one bounded pass over immutable PE
+  # data. The dedicated legacy section is itself sufficient source evidence.
   $TauriExecutableInfo = $null
-  $TauriMarkerPatterns = @('tauri://localhost', '__TAURI_INTERNALS__', '__TAURI_BUNDLE_TYPE_VAR_')
-  foreach ($MarkerPattern in $TauriMarkerPatterns) {
-    if (@(Find-BinaryPattern -Path $Path -Pattern ([Text.Encoding]::ASCII.GetBytes($MarkerPattern)) -Maximum 1).Count -gt 0) {
-      try { $TauriExecutableInfo = Get-TauriExecutableInfo -Path $Path -ErrorAction Stop } catch { }
-      break
+  $TauriDiagnostics = [Collections.Generic.List[object]]::new()
+  $TauriMarkerPatterns = @('tauri://localhost', '__TAURI_PATTERN__', '__TAURI_INTERNALS__', '__TAURI_BUNDLE_TYPE_VAR_')
+  $TauriGateMarker = $null
+  try {
+    $TauriLayout = Get-PELayout -Path $Path
+    if ($TauriLayout.Sections.Name -contains '.taubndl') {
+      $TauriGateMarker = '.taubndl'
+    } else {
+      $TauriSections = [Collections.Generic.List[Dumplings.Tauri.TauriPeSection]]::new()
+      foreach ($Section in $TauriLayout.Sections) {
+        $TauriSections.Add([Dumplings.Tauri.TauriPeSection]@{
+            Name            = [string]$Section.Name
+            VirtualAddress  = [uint32]$Section.VirtualAddress
+            RawOffset       = [uint32]$Section.RawOffset
+            RawSize         = [uint32]$Section.RawSize
+            Characteristics = [uint32]$Section.Characteristics
+          })
+      }
+      $TauriGateStream = [IO.File]::Open($Path, 'Open', 'Read', 'Read')
+      try {
+        $TauriGateMarker = [Dumplings.Tauri.TauriExecutableScanner]::FindFirstAsciiPattern(
+          $TauriGateStream, $TauriSections.ToArray(), [string[]]$TauriMarkerPatterns, 1073741824)
+      } finally { $TauriGateStream.Dispose() }
+    }
+  } catch { }
+  if ($TauriGateMarker) {
+    try {
+      $TauriExecutableInfo = Get-TauriExecutableInfo -Path $Path -ErrorAction Stop
+    } catch {
+      $TauriDiagnostics.Add((New-InstallerDiagnostic -Id 'Tauri.ParserFailed' -Source 'Tauri' `
+            -Message $_.Exception.Message -Kind Incomplete -Areas @('Detection', 'Metadata', 'Extraction') `
+            -AffectedFields @('TauriExecutableInfo', 'EmbeddedAssets') `
+            -Evidence ([pscustomobject]@{ GateMarker = $TauriGateMarker; ExceptionType = $_.Exception.GetType().FullName })))
     }
   }
   $Diagnostics = [Collections.Generic.List[object]]::new()
-  foreach ($Diagnostic in @($ArchitectureInfo.Diagnostics) + @($DependencyInfo.Diagnostics) + @($TauriExecutableInfo.Diagnostics)) {
+  foreach ($Diagnostic in @($ArchitectureInfo.Diagnostics) + @($DependencyInfo.Diagnostics) + @($TauriExecutableInfo.Diagnostics) + $TauriDiagnostics.ToArray()) {
     if ($null -ne $Diagnostic) { $Diagnostics.Add($Diagnostic) }
   }
   [pscustomobject]@{
@@ -544,7 +571,7 @@ function Get-InstallerGenericExeFamilyCandidate {
     @{ Name = 'InstallShield'; Patterns = @('InstallShield', 'ISSetup.dll', 'InstallScript', 'setup.inx', 'ISScript') },
     @{ Name = 'Velopack'; Patterns = @('Velopack', 'vpk_', 'RELEASES.json') },
     @{ Name = 'Squirrel'; Patterns = @('Squirrel', 'SquirrelSetup', 'Update.exe', '.nupkg', 'RELEASES') },
-    @{ Name = 'Zero Install'; Patterns = @('ZeroInstall.BootstrapConfig.ini', 'Downloads and runs Zero Install', 'Downloads and integrates') },
+    @{ Name = 'Zero Install'; Patterns = @('ZeroInstall.EmbeddedConfig.txt', 'ZeroInstall.config.ini', 'ZeroInstall.BootstrapConfig.ini', 'Downloads and runs Zero Install', 'Downloads and integrates') },
     @{ Name = 'Setup Factory'; Patterns = @('Setup Factory', 'Indigo Rose', 'IRSetup') },
     @{ Name = 'InstallAnywhere'; Patterns = @('InstallAnywhere', 'Zero G', 'lax.nl.current.vm', 'com.zerog', 'IAClasses.zip', 'Execute.zip', 'InstallScript.iap_xml') },
     @{ Name = 'InstallAware'; Patterns = @('InstallAware', 'MimarSinan') },
@@ -616,9 +643,13 @@ function Get-InstallerStructuralExeFamilyCandidate {
   # Zero Install launchers are managed PEs with a named embedded bootstrap
   # configuration. Requiring the CLR ManifestResource row avoids classifying
   # unrelated .NET applications that merely mention Zero Install in strings.
-  $ManagedConfig = Get-PEManagedResourceInfo -Path $File.FullName -Name 'ZeroInstall.BootstrapConfig.ini' -MaximumResources 16384 -MaximumResourceBytes 1048576 -ErrorAction SilentlyContinue | Select-Object -First 1
+  $ManagedConfig = Get-PEManagedResourceInfo -Path $File.FullName -Name @('ZeroInstall.EmbeddedConfig.txt', 'ZeroInstall.config.ini', 'ZeroInstall.BootstrapConfig.ini') -MaximumResources 16384 -MaximumResourceBytes 1048576 -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($ManagedConfig -and $Seen.Add('Zero Install')) {
-    [pscustomobject]@{ Family = 'Zero Install'; Confidence = 'high'; MatchedMarkers = @('CLR ManifestResource ZeroInstall.BootstrapConfig.ini') }
+    [pscustomobject]@{ Family = 'Zero Install'; Confidence = 'high'; MatchedMarkers = @("CLR ManifestResource $($ManagedConfig.Name)") }
+  } elseif ((Test-ZeroInstallInstaller -Path $File.FullName) -and $Seen.Add('Zero Install')) {
+    # The 2.11.0-2.11.5 bootstrapper predates customizable resources. Its
+    # exact CLR type identity is the structural record used by the family probe.
+    [pscustomobject]@{ Family = 'Zero Install'; Confidence = 'high'; MatchedMarkers = @('CLR type ZeroInstall.Bootstrap.BootstrapProcess') }
   }
 
   # dotNetInstaller requires exactly one bounded CUSTOM/RES_CONFIGURATION

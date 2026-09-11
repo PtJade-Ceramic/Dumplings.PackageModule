@@ -210,12 +210,18 @@
   'DialpadSetup-2605.1.0_x64.exe'                              = 'Installers\Squirrel\Dialpad.Dialpad\2605.1.0\DialpadSetup-2605.1.0_x64.exe'
   'DiscordSetup-1.0.9244.exe'                                  = 'Installers\Squirrel\Discord.Discord\1.0.9244\DiscordSetup-1.0.9244.exe'
   'Figma-126.6.12.exe'                                         = 'Installers\Squirrel\Figma.Figma\126.6.12\Figma-126.6.12.exe'
+  'LegacyTestApp-ClowdV2-Setup.exe'                            = 'Installers\Squirrel\Velopack.LegacyTestApp\Clowd.Squirrel-2.11.1\LegacyTestApp-ClowdV2-Setup.exe'
+  'LegacyTestApp-ClowdV3-Setup.exe'                            = 'Installers\Squirrel\Velopack.LegacyTestApp\Clowd.Squirrel-3.x\LegacyTestApp-ClowdV3-Setup.exe'
+  'LegacyTestApp-SquirrelWinV2-Setup.exe'                      = 'Installers\Squirrel\Velopack.LegacyTestApp\Squirrel.Windows-2.0.1\LegacyTestApp-SquirrelWinV2-Setup.exe'
+  'LegacyTestApp-Velopack0084-Setup.exe'                       = 'Installers\Squirrel\Velopack.LegacyTestApp\Velopack-0.0.84\LegacyTestApp-Velopack0084-Setup.exe'
+  'LegacyTestApp-Velopack1298-Setup.exe'                       = 'Installers\Squirrel\Velopack.LegacyTestApp\Velopack-1.2.98\LegacyTestApp-Velopack1298-Setup.exe'
   'SlackSetup-4.50.143.exe'                                    = 'Installers\Squirrel\SlackTechnologies.Slack\4.50.143\SlackSetup-4.50.143.exe'
   'SourceTreeSetup-3.4.31.exe'                                 = 'Installers\Squirrel\Atlassian.Sourcetree\3.4.31\SourceTreeSetup-3.4.31.exe'
   'TogglTrack-windows64.exe'                                   = 'Installers\Squirrel\Toggl.TogglTrack\Current\TogglTrack-windows64.exe'
   'Tower-13.1.576.exe'                                         = 'Installers\Squirrel\SaaSGroup.Tower\13.1.576\Tower-13.1.576.exe'
 
   # Tauri and portable assets
+  'Readest_0.9.100_x64-portable.exe'                           = 'Installers\Portable\chrox.Readest\0.9.100\Readest_0.9.100_x64-portable.exe'
   'Clash.Verge_1.7.7_arm64_portable.zip'                       = 'Installers\Portable\ClashVergeRev.ClashVergeRev\1.7.7\Clash.Verge_1.7.7_arm64_portable.zip'
   'Clash.Verge_1.7.7_x64_portable.zip'                         = 'Installers\Portable\ClashVergeRev.ClashVergeRev\1.7.7\Clash.Verge_1.7.7_x64_portable.zip'
   'Clash.Verge_1.7.7_x86_portable.zip'                         = 'Installers\Portable\ClashVergeRev.ClashVergeRev\1.7.7\Clash.Verge_1.7.7_x86_portable.zip'

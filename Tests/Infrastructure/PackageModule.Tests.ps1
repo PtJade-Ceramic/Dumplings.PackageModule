@@ -152,6 +152,6 @@ Describe 'Provider-neutral installer analysis projection' {
     $Generic.PSObject.Properties.Name | Should -Not -Contain 'SuggestedManifestVariants'
     $GenericRoute.PSObject.Properties.Name | Should -Not -Contain 'SuggestedManifestFields'
     $WinGet.SuggestedManifestFields.InstallerType | Should -Be 'exe'
-    $WinGetRoute.SuggestedManifestFields.InstallerSwitches.Silent | Should -Be '/s'
+    $WinGetRoute.SuggestedManifestFields.PSObject.Properties.Name | Should -Not -Contain 'InstallerSwitches'
   }
 }

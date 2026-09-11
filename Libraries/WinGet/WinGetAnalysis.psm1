@@ -124,7 +124,7 @@ function Get-WinGetInstallerFamilyTemplate {
         ExpectedReturnCodes = @()
         UpgradeBehavior     = 'install'
         Notes               = @(
-          'Parse ZeroInstall.BootstrapConfig.ini once with Get-ZeroInstallInfo; target version, publisher, architecture, and capabilities come from caller-supplied feed XML.',
+          'Parse the source-backed legacy CLR identity or generation-specific EmbeddedConfig.txt, config.ini, or BootstrapConfig.ini once with Get-ZeroInstallInfo; target version, publisher, architecture, and capabilities come from caller-supplied feed XML.',
           'The default ARP entry is per-user and --machine selects machine integration only when integrate_args is configured.',
           'Zero Install integration does not write DisplayVersion; validate target-application behavior in a VM.'
         )
@@ -176,7 +176,7 @@ function Get-WinGetInstallerFamilyTemplate {
         InstallerSwitches   = [ordered]@{ Silent = '--silent'; SilentWithProgress = '--silent'; InstallLocation = '--installto "<INSTALLPATH>"'; Log = '--log "<LOGPATH>"' }
         ExpectedReturnCodes = @()
         UpgradeBehavior     = 'install'
-        Notes               = @('Use only when the Velopack bundle locator and signature validate.', 'ProductCode is usually the embedded .nuspec id.', 'VM-check HKCU ARP, install path, and upgrade behavior.')
+        Notes               = @('Use only when Get-SquirrelInfo validates Clowd DATA/#205 or a signed Velopack-family bundle; apply command-line fields from its launcher capabilities.', 'ProductCode is usually the embedded .nuspec id.', 'VM-check HKCU ARP, install path, and upgrade behavior.')
       }
     }
     'Setup Factory' {
@@ -329,10 +329,8 @@ function Get-WinGetInstallerFamilyTemplate {
     'Paquet Builder' {
       [pscustomobject]@{
         InstallerType       = 'exe'
-        InstallModes        = @('interactive', 'silent')
-        InstallerSwitches   = [ordered]@{ Silent = '/s'; SilentWithProgress = '/s' }
         ExpectedReturnCodes = @()
-        Notes               = @('Paquet Builder 2026.1 and later recognize /s and /silent natively when the project keeps that option enabled.', 'Older or customized packages may require project-defined command-line parsing; verify the exact package.')
+        Notes               = @('Use exact parser evidence before suggesting Paquet Builder switches or modes; historical resource-runtime generations do not share the current compiled command-line route.')
       }
     }
     'CreateInstall' {
@@ -660,6 +658,24 @@ function Get-WinGetParserResultSuggestion {
       $Value = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name $Field
       if (Test-WinGetSuggestionValue -Value $Value) { $Fields[$Field] = Copy-WinGetManifestValue -Value $Value }
     }
+  }
+
+  if ($Family -ceq 'Zero Install' -and $Metadata) {
+    # The family template describes current application bootstrappers. Exact
+    # parser evidence must remove those defaults for generic or historical
+    # launchers that predate silent, machine-scope, or store-path switches.
+    foreach ($Field in @('Scope', 'ProductCode', 'InstallModes', 'InstallerSwitches', 'AppsAndFeaturesEntries')) { $Fields.Remove($Field) }
+    $MetadataScope = [string](Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name Scope)
+    if ($MetadataScope -cin @('user', 'machine')) { $Fields['Scope'] = $MetadataScope }
+    $MetadataProductCode = [string](Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name ProductCode)
+    if (-not [string]::IsNullOrWhiteSpace($MetadataProductCode)) { $Fields['ProductCode'] = $MetadataProductCode }
+    $MetadataModes = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name InstallModes
+    if (Test-WinGetSuggestionValue -Value $MetadataModes) { $Fields['InstallModes'] = Copy-WinGetManifestValue -Value $MetadataModes }
+    $MetadataSwitches = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name InstallerSwitches
+    if (Test-WinGetSuggestionValue -Value $MetadataSwitches) { $Fields['InstallerSwitches'] = Copy-WinGetManifestValue -Value $MetadataSwitches }
+    $MetadataArp = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name AppsAndFeaturesEntries
+    if (Test-WinGetSuggestionValue -Value $MetadataArp) { $Fields['AppsAndFeaturesEntries'] = Copy-WinGetManifestValue -Value $MetadataArp }
+    if ([string]::IsNullOrWhiteSpace([string](Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name AppUri))) { $Fields.Remove('UpgradeBehavior') }
   }
 
   $MetadataVariant = if ($Metadata) { [string](Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name Variant) } else { $null }

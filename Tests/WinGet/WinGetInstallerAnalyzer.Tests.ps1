@@ -652,7 +652,9 @@ Describe 'WinGet installer analyzer content detection' {
 
     $Candidate.Family | Should -Be 'Paquet Builder'
     $Candidate.PSObject.Properties.Name | Should -Not -Contain 'SuggestedManifestFields'
-    (& (Get-Module WinGetAnalysis) { (Get-WinGetInstallerFamilySuggestion -Family 'Paquet Builder').ManifestFields }).InstallerSwitches.Silent | Should -Be '/s'
+    $Fields = & (Get-Module WinGetAnalysis) { (Get-WinGetInstallerFamilySuggestion -Family 'Paquet Builder').ManifestFields }
+    $Fields.InstallerType | Should -Be 'exe'
+    $Fields.PSObject.Properties.Name | Should -Not -Contain 'InstallerSwitches'
   }
 
   It 'Should route CreateInstall markers to its family defaults' {
@@ -697,8 +699,10 @@ Describe 'WinGet installer analyzer content detection' {
   }
 
   It 'Should project the structurally confirmed Squirrel or Velopack family' -ForEach @(
-    @{ Name = 'SourceTreeSetup-3.4.31.exe'; Url = 'https://product-downloads.atlassian.com/software/sourcetree/windows/ga/SourceTreeSetup-3.4.31.exe'; Family = 'Squirrel' }
-    @{ Name = 'AppeeeSetup.exe'; Url = 'https://web.appeee.nl/Files/UpdateWinApp/appeee/AppeeeSetup.exe'; Family = 'Velopack' }
+    @{ Name = 'SourceTreeSetup-3.4.31.exe'; Url = 'https://product-downloads.atlassian.com/software/sourcetree/windows/ga/SourceTreeSetup-3.4.31.exe'; Family = 'Squirrel'; Generation = 'Squirrel.Windows'; Architecture = $null; ModernSwitches = $false }
+    @{ Name = 'AppeeeSetup.exe'; Url = 'https://web.appeee.nl/Files/UpdateWinApp/appeee/AppeeeSetup.exe'; Family = 'Velopack'; Generation = 'Clowd.Squirrel.Bundle'; Architecture = 'x86'; ModernSwitches = $false }
+    @{ Name = 'Tower-13.1.576.exe'; Url = 'https://www.git-tower.com/apps/tower3-win/576-01812649/Tower-13.1.576.exe'; Family = 'Velopack'; Generation = 'Velopack'; Architecture = 'x64'; ModernSwitches = $true }
+    @{ Name = 'LegacyTestApp-Velopack1298-Setup.exe'; Url = 'https://raw.githubusercontent.com/velopack/velopack/413446c01ce314f2faab0bac974447f36b3092ce/test/fixtures/LegacyTestApp-Velopack1298-Setup.exe'; Family = 'Velopack'; Generation = 'Velopack'; Architecture = 'x64'; ModernSwitches = $true }
   ) {
     $Installer = Get-AnalyzerInstallerFixture -Name $Name -Url $Url
 
@@ -708,7 +712,40 @@ Describe 'WinGet installer analyzer content detection' {
     $ParserResult.Success | Should -BeTrue
     $ParserResult.Result.Family | Should -Be $Family
     $ParserResult.Result.InstallerType | Should -Be 'exe'
+    $ParserResult.Result.Metadata.LauncherGeneration | Should -Be $Generation
     $ParserResult.Result.SuggestedManifestFields.InstallerType | Should -Be 'exe'
+    if ($Architecture) { $ParserResult.Result.SuggestedManifestFields.Architecture | Should -Be $Architecture }
+    if ($ModernSwitches) {
+      $ParserResult.Result.SuggestedManifestFields.InstallerSwitches.InstallLocation | Should -Be '--installto "<INSTALLPATH>"'
+      $ParserResult.Result.SuggestedManifestFields.InstallerSwitches.Log | Should -Be '--log "<LOGPATH>"'
+    } else {
+      $ParserResult.Result.SuggestedManifestFields.InstallerSwitches.PSObject.Properties.Name | Should -Not -Contain 'InstallLocation'
+      $ParserResult.Result.SuggestedManifestFields.InstallerSwitches.PSObject.Properties.Name | Should -Not -Contain 'Log'
+    }
+  }
+
+  It 'Should project controlled historical Squirrel-family resource layouts' -ForEach @(
+    @{ RelativePath = 'Builders\Squirrel\Squirrel.Windows\1.9.1\ProjectWithContent-1.0.0.0-beta-Setup.exe'; Sha256 = '2D153B0DCF9DFA32C3BDD0DCD7F10E0EDB5DD06307DB339DCBB39B5FF4857FEC'; Family = 'Squirrel'; Route = 'SquirrelPeResource'; Generation = 'Squirrel.Windows'; ProductCode = 'ProjectWithContent' }
+    @{ RelativePath = 'Builders\Squirrel\Clowd.Squirrel\2.7.98-pre\Clowd-3.4.287-Setup.exe'; Sha256 = '39DFBB7880B5C4B928A4B54AC9E350ECE6AF990E27D23866AC1B912127CFF30A'; Family = 'Velopack'; Route = 'ClowdSquirrelPeResource'; Generation = 'Clowd.Squirrel.Resource'; ProductCode = 'Clowd' }
+  ) {
+    $Installer = Resolve-DumplingsTestFixturePath -RelativePath $RelativePath
+    if (-not (Test-Path -LiteralPath $Installer -PathType Leaf)) {
+      Set-ItResult -Skipped -Because "The controlled $Generation fixture is not cached."
+      return
+    }
+
+    (Get-FileHash -LiteralPath $Installer -Algorithm SHA256).Hash | Should -Be $Sha256
+    $Analysis = Get-WinGetInstallerAnalysis -Path $Installer
+    $ParserResult = $Analysis.ParserResults | Where-Object Name -EQ 'Squirrel/Velopack' | Select-Object -First 1
+
+    $ParserResult.Success | Should -BeTrue
+    $ParserResult.Result.Family | Should -Be $Family
+    $ParserResult.Result.Metadata.DetectionRoute | Should -Be $Route
+    $ParserResult.Result.Metadata.LauncherGeneration | Should -Be $Generation
+    $ParserResult.Result.SuggestedManifestFields.ProductCode | Should -Be $ProductCode
+    $ParserResult.Result.SuggestedManifestFields.InstallerSwitches.Silent | Should -Be '--silent'
+    $ParserResult.Result.SuggestedManifestFields.InstallerSwitches.PSObject.Properties.Name | Should -Not -Contain 'InstallLocation'
+    $ParserResult.Result.SuggestedManifestFields.InstallerSwitches.PSObject.Properties.Name | Should -Not -Contain 'Log'
   }
 
   It 'Should not promote common embedded marker strings when their parser rejects the file' -ForEach @(
