@@ -1016,7 +1016,11 @@ function Update-WinGetInstallerManifestInstallerMetadata {
       $InstallerPath
     } elseif ($Installer.InstallerType -cin @('zip') -and $Installer.NestedInstallerType -cne 'portable') {
       $NestedInstallerRelativePath = $Installer.NestedInstallerFiles[0].RelativeFilePath
-      Expand-TempArchive -Path $InstallerPath -RelativeFilePath $NestedInstallerRelativePath -CollisionAction Rename | Join-Path -ChildPath $NestedInstallerRelativePath
+      # NestedInstallerFiles contains literal archive paths. Escape wildcard
+      # metacharacters such as architecture tags written as [x64] before
+      # passing the path to the archive selection API.
+      $NestedInstallerPattern = [WildcardPattern]::Escape($NestedInstallerRelativePath)
+      Expand-TempArchive -Path $InstallerPath -Name $NestedInstallerPattern -CollisionAction Rename | Join-Path -ChildPath $NestedInstallerRelativePath
     } else {
       $InstallerPath
     }

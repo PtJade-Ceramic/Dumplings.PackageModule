@@ -49,6 +49,43 @@ Describe 'Installer bridge' {
     $Info.Scope | Should -Be 'machine'
   }
 
+  It 'Should preserve Setup Factory structural profiles and legacy metadata through the bridge' {
+    $ModernFixture = Resolve-DumplingsTestFixturePath -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'SetupFactory-10.2.0-trial.exe')
+    $LegacyFixture = Resolve-DumplingsTestFixturePath -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'SetupFactory-6.0.1.4-builder.exe')
+    if (-not (Test-Path -LiteralPath $ModernFixture) -or -not (Test-Path -LiteralPath $LegacyFixture)) { Set-ItResult -Skipped -Because 'The Setup Factory profile fixtures are not available'; return }
+
+    $Modern = Get-SetupFactoryInfo -Path $ModernFixture
+    $Legacy = Get-SetupFactoryInfo -Path $LegacyFixture
+
+    $Modern.ParserVersionInfo.ProfileId | Should -Be 'setup-factory-8-plus'
+    $Modern.ParserVersionInfo.BuilderVersion | Should -Be '10.2.0.0'
+    $Modern.ParserVersionInfo.EmbeddedRuntimeVersion | Should -Be '10.2.0.0'
+    $Modern.EmbeddedRuntimeInfo.IsTrusted | Should -BeTrue
+    $Modern.EmbeddedRuntimeInfo.IsProfileCompatible | Should -BeTrue
+    $Modern.PayloadCatalog.Count | Should -Be 1258
+    $Modern.InstalledFileCatalog.CompressionPrefixLength | Should -Be 1
+    $Legacy.ParserVersionInfo.ProfileId | Should -Be 'setup-factory-6'
+    $Legacy.ParserVersionInfo.MetadataRoute | Should -Be 'irdat-v6'
+    $Legacy.ContainerEntries.Name | Should -Contain 'irsetup.dat'
+    $Legacy.PayloadCatalog.Count | Should -Be 923
+    $Legacy.DisplayName | Should -Be 'Setup Factory 6.0 Demo'
+    $Legacy.DisplayVersion | Should -Be '6.0.1.4'
+    $Legacy.ProductCode | Should -Be 'Setup Factory 6.0 Demo'
+    $Legacy.UninstallConfiguration.IncludeUninstall | Should -BeTrue
+    $Legacy.UnresolvedFields | Should -Not -Contain 'ProductCode'
+  }
+
+  It 'Should forward Setup Factory raw-entry extraction through the bridge' {
+    $Fixture = Resolve-DumplingsTestFixturePath -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'OutCALL-2.0.exe')
+    if (-not (Test-Path -LiteralPath $Fixture)) { Set-ItResult -Skipped -Because 'The Setup Factory extraction fixture is not available'; return }
+    $Destination = Join-Path $TestDrive 'setup-factory-raw'
+
+    $Files = @(Expand-SetupFactoryInstaller -Path $Fixture -DestinationPath $Destination -Name 'irsetup.dat' -RawEntries -CollisionAction Error)
+
+    $Files | Should -HaveCount 1
+    (Get-Item -LiteralPath $Files[0]).Length | Should -BeGreaterThan 0
+  }
+
   It 'Should convert electron-builder latest.yml content without fetching it' {
     $LatestYaml = @'
 version: 1.2.3

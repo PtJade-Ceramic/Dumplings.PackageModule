@@ -191,6 +191,16 @@ Describe 'Installer manifest behavior defaults' {
     }
   }
 
+  It 'Should not advertise silent-with-progress behavior for Setup Factory' {
+    InModuleScope WinGetAnalysis {
+      $Fields = (Get-WinGetInstallerFamilySuggestion -Family 'Setup Factory').ManifestFields
+
+      $Fields.InstallModes | Should -Be @('interactive', 'silent')
+      $Fields.InstallerSwitches.Silent | Should -Be '/S'
+      $Fields.InstallerSwitches.PSObject.Properties.Name | Should -Not -Contain 'SilentWithProgress'
+    }
+  }
+
   It 'Should mirror documented Wise and Qt IFW installer-level fields' {
     InModuleScope WinGetAnalysis {
       $Wise = (Get-WinGetInstallerFamilySuggestion -Family 'Wise').ManifestFields

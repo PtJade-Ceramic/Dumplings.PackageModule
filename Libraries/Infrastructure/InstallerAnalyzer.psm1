@@ -1635,7 +1635,13 @@ function Invoke-InstallerExeParser {
 
     if (Test-InstallerCandidateFamily -Family 'InstallBuilder') {
       Invoke-InstallerDetector -Name 'InstallBuilder' -ScriptBlock {
+        if (-not (Get-PELayout -Path $AnalyzerInstallerPath)) {
+          throw 'The candidate does not contain a valid PE and structured InstallBuilder container.'
+        }
         $Info = Get-InstallBuilderInfo -Path $AnalyzerInstallerPath
+        if (-not $Info.CookfsInfo -and @($Info.MetakitLayouts).Count -eq 0) {
+          throw 'The candidate does not contain a validated InstallBuilder Metakit or CookFS container.'
+        }
         [pscustomobject]@{
           Family                  = 'InstallBuilder'
           Confidence              = 'high'
@@ -1651,7 +1657,7 @@ function Invoke-InstallerExeParser {
           RegistryAssociationInfo = $Info.RegistryAssociationInfo
           SupportedScopes         = $Info.SupportedScopes
           NestedInstallerFiles    = $Info.PayloadFiles
-          PayloadCompression      = if ($Info.CookfsInfo) { $Info.CookfsInfo.CompressionTypes } else { @() }
+          PayloadCompression      = if ($Info.CookfsInfo) { $Info.CookfsInfo.CompressionTypes } elseif ($Info.MetakitInfo) { $Info.MetakitInfo.CompressionTypes } else { @() }
         }
       }
     }

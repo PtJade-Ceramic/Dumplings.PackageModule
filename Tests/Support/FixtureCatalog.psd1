@@ -70,6 +70,14 @@
   'MicaSetup-v2.5.4.exe'                                       = 'Installers\MicaSetup\MicaSetup\2.5.4\MicaSetup-v2.5.4.exe'
   'MicaSetup-v2.5.6.exe'                                       = 'Installers\MicaSetup\MicaSetup\2.5.6\MicaSetup-v2.5.6.exe'
 
+  # InstallBuilder
+  'installbuilder-3.6.0-windows-installer.exe'                 = 'Installers\InstallBuilder\BitRock.InstallBuilder\3.6.0\installbuilder-3.6.0-windows-installer.exe'
+  'jxplorer-3.3.1.2-windows-installer.exe'                     = 'Installers\InstallBuilder\JXplorer.JXplorer\3.3.1.2\jxplorer-3.3.1.2-windows-installer.exe'
+  'installbuilder-enterprise-8.2.0-windows-installer.exe'      = 'Installers\InstallBuilder\BitRock.InstallBuilder.Enterprise\8.2.0\installbuilder-enterprise-8.2.0-windows-installer.exe'
+  'installbuilder-9.5.5-windows-installer.exe'                 = 'Installers\InstallBuilder\BitRock.InstallBuilder\9.5.5\installbuilder-9.5.5-windows-installer.exe'
+  'installbuilder-23.1.0-windows-installer.exe'                = 'Installers\InstallBuilder\BackstaffSoftware.InstallBuilder\23.1.0\installbuilder-23.1.0-windows-installer.exe'
+  'installbuilder-26.8.0-windows-x64-installer.exe'            = 'Installers\InstallBuilder\BackstaffSoftware.InstallBuilder\26.8.0\installbuilder-26.8.0-windows-x64-installer.exe'
+
   # DeployMaster and InstallMate
   'Setup Brinno Video Player.exe'                              = 'Installers\DeployMaster\Brinno.BrinnoVideoPlayer\1.139.00\Setup Brinno Video Player.exe'
   'PoP8Setup.exe'                                              = 'Installers\InstallMate\Tarma.PublishOrPerish\8\PoP8Setup.exe'
@@ -268,6 +276,23 @@
   'Communicator-7.6.0.exe'                                     = 'Installers\SetupFactory\BicomSystems.Communicator\7.6.0\Communicator-7.6.0.exe'
   'gloCOM-7.6.0.4.exe'                                         = 'Installers\SetupFactory\BicomSystems.gloCOM\7.6.0.4\gloCOM-7.6.0.4.exe'
   'SafeguardPDFViewer_v3.exe'                                  = 'Installers\SetupFactory\Locklizard.SafeguardPDFViewer\3.0.2.231\SafeguardPDFViewer_v3.exe'
+  'SetupFactory-4-inst95.exe'                                  = 'Installers\SetupFactory\Historical\4.0.0.0\inst95.exe'
+  'SetupFactory-5-ttally11.exe'                                = 'Installers\SetupFactory\Historical\5.0.0\ttally11.exe'
+  'SetupFactory-6-suf60ev.exe'                                 = 'Installers\SetupFactory\Historical\6.0.1.2\suf60ev.exe'
+  'SetupFactory-4.0-builder.exe'                               = 'Installers\SetupFactory\IndigoRose.SetupFactory\HistoricalBuilders\4.0-capture-20010412\suf40.exe'
+  'SetupFactory-5.0.1.6-builder.exe'                           = 'Installers\SetupFactory\IndigoRose.SetupFactory\HistoricalBuilders\5.0-capture-20011201\suf50.exe'
+  'SetupFactory-6.0.1.4-builder.exe'                           = 'Installers\SetupFactory\IndigoRose.SetupFactory\HistoricalBuilders\6.0-capture-20040216\suf60ev.exe'
+  'SetupFactory-7.0.6.1-builder.exe'                           = 'Installers\SetupFactory\IndigoRose.SetupFactory\7.0.6.1\setup-factory-7.0.6.1.exe'
+  'SetupFactory-8.1.1008.0-builder.exe'                        = 'Installers\SetupFactory\IndigoRose.SetupFactory\8.1.1008.0\suf80ev.exe'
+  'SetupFactory-7.0.1-ReNamer.exe'                             = 'Installers\SetupFactory\Historical\7.0.1.0\ReNamer.exe'
+  'SetupFactory-7.0.3-setup365dni.exe'                         = 'Installers\SetupFactory\Historical\7.0.3.0\setup365dni.exe'
+  'SetupFactory-7.0.6-FLVPlayerSetup.exe'                      = 'Installers\SetupFactory\Historical\7.0.6.1\FLVPlayerSetup.exe'
+  'SetupFactory-9.0.3-trial.exe'                               = 'Installers\SetupFactory\IndigoRose.SetupFactory\9.0.3\setup-factory-trial.exe'
+  'SetupFactory-9.0.4-trial.exe'                               = 'Installers\SetupFactory\IndigoRose.SetupFactory\20120410085130\setup-factory-trial.exe'
+  'SetupFactory-9.1.1-trial.exe'                               = 'Installers\SetupFactory\IndigoRose.SetupFactory\20130625191302\setup-factory-trial.exe'
+  'SetupFactory-9.2.0-trial.exe'                               = 'Installers\SetupFactory\IndigoRose.SetupFactory\20131007154922\setup-factory-trial.exe'
+  'SetupFactory-9.5.1-trial.exe'                               = 'Installers\SetupFactory\IndigoRose.SetupFactory\20160309211438\setup-factory-trial.exe'
+  'SetupFactory-10.2.0-trial.exe'                              = 'Installers\SetupFactory\IndigoRose.SetupFactory\10.2.0\setup-factory-trial.exe'
   'Reasonix-windows-amd64-installer-1.17.13.exe'               = 'Installers\NSIS\ESEngine.ReasonixDesktop\1.17.13\Reasonix-windows-amd64-installer-1.17.13.exe'
   'TI-Connect-4.0.0.218.exe'                                   = 'Installers\Wise\TexasInstruments.TIConnect\4.0.0.218\TI-Connect-4.0.0.218.exe'
 }

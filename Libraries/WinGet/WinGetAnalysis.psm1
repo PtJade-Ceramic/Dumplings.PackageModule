@@ -183,7 +183,7 @@ function Get-WinGetInstallerFamilyTemplate {
       [pscustomobject]@{
         InstallerType       = 'exe'
         InstallModes        = @('interactive', 'silent')
-        InstallerSwitches   = [ordered]@{ Silent = '/S'; SilentWithProgress = '/S' }
+        InstallerSwitches   = [ordered]@{ Silent = '/S' }
         ExpectedReturnCodes = @()
         Notes               = @('Use Get-SetupFactoryInfo for structured session variables, built-in uninstall settings, literal registry actions, ProductCode, publisher, and scope.', 'Verify case-sensitive switches and any required no-restart option in a VM.')
       }
@@ -320,10 +320,8 @@ function Get-WinGetInstallerFamilyTemplate {
     'InstallBuilder' {
       [pscustomobject]@{
         InstallerType       = 'exe'
-        InstallModes        = @('interactive', 'silent', 'silentWithProgress')
-        InstallerSwitches   = [ordered]@{ Silent = '--mode unattended'; SilentWithProgress = '--mode unattended --unattendedmodeui minimal'; InstallLocation = '--prefix "<INSTALLPATH>"'; Log = '--debugtrace "<LOGPATH>"' }
         ExpectedReturnCodes = @()
-        Notes               = @('InstallBuilder --help commonly opens a transient GUI help window; prefer static strings, vendor docs, or VM validation.', 'Verify whether the package supports user or machine scope before setting Scope.')
+        Notes               = @('Parse the compiled project before suggesting modes or switches: projects can exclude unattended mode and can rename the install-directory option.', 'InstallBuilder --help commonly opens a transient GUI help window; prefer static project evidence, vendor docs, or VM validation.', 'Verify whether the package supports user or machine scope before setting Scope.')
       }
     }
     'Paquet Builder' {
@@ -432,7 +430,10 @@ function ConvertTo-WinGetSuggestionValue {
     }
     return $Result
   }
-  if ($Value.GetType() -eq [pscustomobject]) {
+  # The [pscustomobject] accelerator resolves to PSObject and therefore matches every wrapped
+  # PowerShell value with -is. Compare against the concrete type so only property bags become
+  # schema-ready dictionaries; arrays and scalars must retain their original shapes.
+  if ($Value.GetType() -eq [System.Management.Automation.PSCustomObject]) {
     $Result = [ordered]@{}
     foreach ($Property in $Value.PSObject.Properties) {
       $NestedValue = ConvertTo-WinGetSuggestionValue -Value $Property.Value

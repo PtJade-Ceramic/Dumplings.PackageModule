@@ -652,11 +652,11 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
       ($Script:LogMessages.Where({ $_.Level -eq 'Warning' }).Message -join "`n") | Should -BeLike '*synthetic analyzer failure*'
     }
 
-    It 'Extracts only the selected nested installer from a ZIP archive' {
+    It 'Extracts a literal bracketed nested installer path from a ZIP archive' {
       $ArchivePath = Join-Path $TestDrive 'large-archive-without-extension'
       $Archive = [IO.Compression.ZipFile]::Open($ArchivePath, [IO.Compression.ZipArchiveMode]::Create)
       try {
-        $NestedEntry = $Archive.CreateEntry('payload/setup.exe')
+        $NestedEntry = $Archive.CreateEntry('payload/setup[x64].exe')
         $NestedStream = $NestedEntry.Open()
         try { $NestedStream.Write([byte[]](1, 2, 3, 4)) } finally { $NestedStream.Dispose() }
 
@@ -689,7 +689,7 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
         Architecture         = 'x64'
         InstallerType        = 'zip'
         NestedInstallerType  = 'nullsoft'
-        NestedInstallerFiles = @([ordered]@{ RelativeFilePath = 'payload\setup.exe' })
+        NestedInstallerFiles = @([ordered]@{ RelativeFilePath = 'payload\setup[x64].exe' })
         InstallerUrl         = $ArchiveUrl
         ProductCode          = 'Old.Nested.Product'
       }
@@ -698,7 +698,7 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
 
       try {
         $Result.ProductCode | Should -Be 'Nested.NSIS.Product'
-        $Script:ParsedNestedPath | Should -Exist
+        Test-Path -LiteralPath $Script:ParsedNestedPath | Should -BeTrue
         $ExtractionRoot = Split-Path (Split-Path $Script:ParsedNestedPath -Parent) -Parent
         Join-Path $ExtractionRoot 'unrelated\large.bin' | Should -Not -Exist
       } finally {
