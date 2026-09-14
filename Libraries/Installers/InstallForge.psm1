@@ -106,6 +106,28 @@ function Test-InstallForgeResolvedValue {
   return $null -eq $Value -or ($Value -notmatch '<[^<>]+>' -and $Value -notmatch '\[[^\[\]]+\]')
 }
 
+function Get-InstallForgeUnresolvedPropertyName {
+  <#
+  .SYNOPSIS
+    Identify record properties that still contain runtime-only InstallForge expressions.
+  .PARAMETER InputObject
+    Parsed command, shortcut, or finish-action record after deterministic constants have been resolved.
+  .PARAMETER PropertyName
+    Text properties to inspect for unresolved angle-bracket or bracket expressions.
+  #>
+  [OutputType([string[]])]
+  param (
+    [Parameter(Mandatory)][psobject]$InputObject,
+    [Parameter(Mandatory)][string[]]$PropertyName
+  )
+
+  $Result = [Collections.Generic.List[string]]::new()
+  foreach ($Name in $PropertyName) {
+    if ($InputObject.PSObject.Properties[$Name] -and -not (Test-InstallForgeResolvedValue -Value ([string]$InputObject.$Name))) { $Result.Add($Name) }
+  }
+  return $Result.ToArray()
+}
+
 function ConvertTo-InstallForgeRegistryHive {
   <#
   .SYNOPSIS
@@ -841,18 +863,24 @@ function Get-InstallForgeCommandRecords {
   foreach ($Command in $Commands) {
     $Command.Command = Resolve-InstallForgeConstantValue -Value $Command.Command -Constant $Constant
     $Command.Arguments = Resolve-InstallForgeConstantValue -Value $Command.Arguments -Constant $Constant
+    $UnresolvedProperties = @(Get-InstallForgeUnresolvedPropertyName -InputObject $Command -PropertyName Command, Arguments)
     $OptionTokens = [string[]]@([regex]::Matches([string]$Command.Options, '\S+') | ForEach-Object Value)
     $UnknownOptions = [string[]]@($OptionTokens | Where-Object { $_ -ine '-wait' -and $_ -ine '-hide' })
     $Command | Add-Member -NotePropertyName OptionTokens -NotePropertyValue $OptionTokens
     $Command | Add-Member -NotePropertyName WaitForExit -NotePropertyValue ($OptionTokens -icontains '-wait')
     $Command | Add-Member -NotePropertyName Hidden -NotePropertyValue ($OptionTokens -icontains '-hide')
     $Command | Add-Member -NotePropertyName UnknownOptions -NotePropertyValue $UnknownOptions
+    $Command | Add-Member -NotePropertyName HasUnresolvedRuntimeValue -NotePropertyValue ($UnresolvedProperties.Count -gt 0)
+    $Command | Add-Member -NotePropertyName UnresolvedProperties -NotePropertyValue ([string[]]$UnresolvedProperties)
 
     if ($Command.Type -notin 'Execute Application', 'Shell Execute') {
       $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallForge.Command.UnsupportedType' -Source InstallForge -Message "Custom command $($Command.Index) uses unsupported type '$($Command.Type)'." -Kind Unsupported -Areas Installability, Security -Evidence ([ordered]@{ Index = $Command.Index; Type = $Command.Type })))
     }
     if ($UnknownOptions.Count -gt 0) {
       $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallForge.Command.UnsupportedOption' -Source InstallForge -Message "Custom command $($Command.Index) uses unsupported option token(s): $($UnknownOptions -join ', ')." -Kind Unsupported -Areas Installability, Security -Evidence ([ordered]@{ Index = $Command.Index; Options = $UnknownOptions })))
+    }
+    if ($UnresolvedProperties.Count -gt 0) {
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallForge.Command.RuntimeValueUnresolved' -Source InstallForge -Message "Custom command $($Command.Index) depends on runtime-only value(s) in: $($UnresolvedProperties -join ', ')." -Kind Incomplete -Areas Installability, Security -Evidence ([ordered]@{ Index = $Command.Index; Properties = [string[]]$UnresolvedProperties })))
     }
   }
   return $Commands
@@ -1334,6 +1362,12 @@ function Get-InstallForgeInfo {
     $ShortcutRecords = @(Get-InstallForgeShortcutRecords -Layout $Layout -Setup $Setup)
     foreach ($Shortcut in $ShortcutRecords) {
       foreach ($Property in 'Target', 'Arguments', 'IconPath') { if ($Shortcut.PSObject.Properties[$Property]) { $Shortcut.$Property = Resolve-InstallForgeConstantValue -Value $Shortcut.$Property -Constant $Constant } }
+      $ShortcutUnresolvedProperties = @(Get-InstallForgeUnresolvedPropertyName -InputObject $Shortcut -PropertyName Target, Arguments, IconPath)
+      $Shortcut | Add-Member -NotePropertyName HasUnresolvedRuntimeValue -NotePropertyValue ($ShortcutUnresolvedProperties.Count -gt 0)
+      $Shortcut | Add-Member -NotePropertyName UnresolvedProperties -NotePropertyValue ([string[]]$ShortcutUnresolvedProperties)
+      if ($ShortcutUnresolvedProperties.Count -gt 0) {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallForge.Shortcut.RuntimeValueUnresolved' -Source InstallForge -Message "$($Shortcut.Destination) shortcut $($Shortcut.Index) depends on runtime-only value(s) in: $($ShortcutUnresolvedProperties -join ', ')." -Kind Incomplete -Areas Installability -Evidence ([ordered]@{ Destination = $Shortcut.Destination; Index = $Shortcut.Index; Properties = [string[]]$ShortcutUnresolvedProperties })))
+      }
     }
     $StartMenuAllUsersValue = Get-InstallForgeDictionaryValue -Dictionary $Setup -Name SFA
     $DesktopAllUsersValue = Get-InstallForgeDictionaryValue -Dictionary $Setup -Name DFA
@@ -1363,6 +1397,17 @@ function Get-InstallForgeInfo {
     $MainExecutableCandidate = Resolve-InstallForgeConstantValue -Value $MainExecutableExpression -Constant $Constant
     $MainExecutable = (Test-InstallForgeResolvedValue -Value $MainExecutableCandidate) ? $MainExecutableCandidate : $null
     $PayloadEvidence = Get-InstallForgePayloadEvidence -Layout $Layout -MainExecutable $MainExecutable -InstallLocation $InstallLocation -GeneratedUninstallerEntry $GeneratedUninstallerEntry -Diagnostics $Diagnostics
+    $FinishAction = [pscustomobject]@{
+      Launch = (Get-InstallForgeDictionaryValue -Dictionary $Setup -Name Addition) -eq '1'
+      Program = Resolve-InstallForgeConstantValue -Value ([string](Get-InstallForgeDictionaryValue -Dictionary $Setup -Name ProgramRun)) -Constant $Constant
+      Arguments = Resolve-InstallForgeConstantValue -Value ([string](Get-InstallForgeDictionaryValue -Dictionary $Setup -Name ProgramRunArguments)) -Constant $Constant
+    }
+    $FinishActionUnresolvedProperties = @(Get-InstallForgeUnresolvedPropertyName -InputObject $FinishAction -PropertyName Program, Arguments)
+    $FinishAction | Add-Member -NotePropertyName HasUnresolvedRuntimeValue -NotePropertyValue ($FinishActionUnresolvedProperties.Count -gt 0)
+    $FinishAction | Add-Member -NotePropertyName UnresolvedProperties -NotePropertyValue ([string[]]$FinishActionUnresolvedProperties)
+    if ($FinishAction.Launch -and $FinishActionUnresolvedProperties.Count -gt 0) {
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallForge.FinishAction.RuntimeValueUnresolved' -Source InstallForge -Message "The enabled finish action depends on runtime-only value(s) in: $($FinishActionUnresolvedProperties -join ', ')." -Kind Incomplete -Areas Installability, Security -Evidence ([ordered]@{ Properties = [string[]]$FinishActionUnresolvedProperties })))
+    }
     # A complete one-architecture payload is authoritative. Mixed or partially
     # analyzed payloads deliberately suppress the architecture scalar instead of
     # leaking the architecture of InstallForge's outer setup stub into WinGet.
@@ -1388,7 +1433,7 @@ function Get-InstallForgeInfo {
       RegistryWrites = $RegistryWrites; RegistryOperations = $RegistryOperations; RegistryAssociationInfo = $AssociationInfo; Protocols = [string[]]$AssociationInfo.Protocols; FileExtensions = [string[]]$AssociationInfo.FileExtensions
       Shortcuts = $ShortcutRecords; StartMenuShortcutsForAllUsers = $StartMenuShortcutsForAllUsers; DesktopShortcutsForAllUsers = $DesktopShortcutsForAllUsers
       Variables = $Variables; Commands = $Commands; Requirements = $Requirements; Languages = $Languages
-      FinishActions = [pscustomobject]@{ Launch = (Get-InstallForgeDictionaryValue -Dictionary $Setup -Name Addition) -eq '1'; Program = Resolve-InstallForgeConstantValue -Value ([string](Get-InstallForgeDictionaryValue -Dictionary $Setup -Name ProgramRun)) -Constant $Constant; Arguments = [string](Get-InstallForgeDictionaryValue -Dictionary $Setup -Name ProgramRunArguments) }
+      FinishActions = $FinishAction
       Configuration = $Configuration; ConfigurationFiles = @($Layout.Configuration.Entries.FullName); PayloadEntries = $PayloadEntries; ExtractedFiles = [string[]]@($PayloadEntries | ForEach-Object FullName); ArchiveOffset = $Layout.Payload ? $Layout.Payload.Offset : $null; ArchiveLength = $Layout.Payload ? $Layout.Payload.Length : $null
       Architecture = $Architecture; SetupArchitectureInfo = $OuterArchitecture; PayloadArchitectures = $PayloadEvidence.Architectures; PayloadArchitectureInfo = $PayloadEvidence.ArchitectureInfo; PayloadDependencyInfo = $PayloadEvidence.DependencyInfo; DependencyInfo = $PayloadEvidence.DependencyInfo; PayloadInspectedFiles = $PayloadEvidence.InspectedFiles; PayloadAnalysisRoute = $PayloadEvidence.AnalysisRoute; PayloadArchitectureComplete = $PayloadEvidence.PayloadArchitectureComplete; PayloadCandidateEvidence = $PayloadEvidence.CandidateEvidence
       ParserVersionInfo = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.InstallForge'; ParserMajor = 3; Sources = @('compiled SC.dat and operation tables', 'validated legacy CAB+ZIP, transitional resource-7z+GZip/TAR, or modern resource-7z+overlay-7z containers', 'controlled InstallForge 1.2.2, 1.2.6.2, 1.3.2, and 1.6.1 installed-state evidence') }

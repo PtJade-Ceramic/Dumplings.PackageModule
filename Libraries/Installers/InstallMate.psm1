@@ -594,11 +594,10 @@ function Get-InstallMateComponentRecord {
       $Cursor += 4
       $DisplayName = Read-InstallMateDatabaseString -Database $Database -Cursor ([ref]$Cursor)
       $DisplayTranslations = Read-InstallMateDatabaseUInt32 -Database $Database -Offset $Cursor
-      if ($DisplayTranslations -ne 0) { continue }
       $Cursor += 4
       $Description = Read-InstallMateDatabaseString -Database $Database -Cursor ([ref]$Cursor)
       $DescriptionTranslations = Read-InstallMateDatabaseUInt32 -Database $Database -Offset $Cursor
-      if ($DescriptionTranslations -ne 0 -or [string]::IsNullOrWhiteSpace($Name)) { continue }
+      if ([string]::IsNullOrWhiteSpace($Name)) { continue }
       $Records.Add([pscustomobject]@{
           RecordOffset = [long]$Offset
           Key          = Read-InstallMateDatabaseKey -Database $Database -Offset ($Offset + 8)
@@ -606,7 +605,9 @@ function Get-InstallMateComponentRecord {
           FolderAlias  = $FolderAlias.Trim([char[]]@('<', '>'))
           Condition    = $Condition
           DisplayName  = $DisplayName
+          DisplayTranslationCount = [uint32]$DisplayTranslations
           Description  = $Description
+          DescriptionTranslationCount = [uint32]$DescriptionTranslations
         })
     } catch { continue }
   }
@@ -1407,7 +1408,13 @@ function Get-InstallMateInstallRecord {
       $Cursor += 4
       $ProductCode = Read-InstallMateDatabaseString -Database $Database -Cursor ([ref]$Cursor)
       $SetupName = Read-InstallMateDatabaseString -Database $Database -Cursor ([ref]$Cursor)
-      $Cursor += 12
+      # Loader + Download media proves that the first four bytes of the old
+      # opaque 12-byte block are a normal length-prefixed package URL. Local
+      # package fixtures store an empty URL, which had hidden the variable size.
+      $PackageDownloadUrl = Read-InstallMateDatabaseString -Database $Database -Cursor ([ref]$Cursor)
+      $ObservedOptionWord1 = Read-InstallMateDatabaseUInt32 -Database $Database -Offset $Cursor
+      $ObservedOptionWord2 = Read-InstallMateDatabaseUInt32 -Database $Database -Offset ($Cursor + 4)
+      $Cursor += 8
       $RuntimeKey = Read-InstallMateDatabaseKey -Database $Database -Offset $Cursor
       $Cursor += 8
       $InstallLevel = Read-InstallMateDatabaseUInt32 -Database $Database -Offset $Cursor
@@ -1424,6 +1431,8 @@ function Get-InstallMateInstallRecord {
           Key                     = Read-InstallMateDatabaseKey -Database $Database -Offset ($Offset + 8)
           ProductCode             = $ProductCode
           SetupName               = $SetupName
+          PackageDownloadUrl      = $PackageDownloadUrl
+          ObservedOptionWords     = [uint32[]]@($ObservedOptionWord1, $ObservedOptionWord2)
           InstallLevel            = [byte]$InstallLevel
           Flags                   = $Flags
           RuntimeKey              = $RuntimeKey
@@ -2074,10 +2083,12 @@ function Get-InstallMateInfo {
     $ArpProjection = if ($DatabaseInfo -and $DatabaseInfo.PSObject.Properties['InstallRecord']) {
       Get-InstallMateAppsAndFeaturesProjection -InstallRecord $DatabaseInfo.InstallRecord -RegistryWrite $RegistryWrites -SymbolValues $DatabaseInfo.Symbols
     } else { [pscustomobject]@{ Entries = @(); BuiltInValues = [ordered]@{} } }
-    if ($DatabaseInfo -and $ArchiveInfo.Signature -cne 'tiz1' -and $ArchiveInfo.FormatMajor -lt 15) {
-      $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallMate.Scope.GenerationUnmapped' -Source InstallMate -Message "InstallMate database $($ArchiveInfo.BuilderFormatVersion) was decoded, but its install-level record layout is not yet mapped; scope falls back to PE elevation evidence." -Kind Incomplete -Areas Metadata -AffectedFields Scope))
-    } elseif ($DatabaseInfo -and $ArchiveInfo.Signature -cne 'tiz1' -and $null -eq $DatabaseInfo.InstallLevel) {
-      $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallMate.Scope.RecordUnresolved' -Source InstallMate -Message 'The InstallMate database did not contain one unambiguous supported install-level record; scope falls back to PE elevation evidence.' -Kind Incomplete -Areas Metadata -AffectedFields Scope))
+    if ($DatabaseInfo -and $ArchiveInfo.Signature -cne 'tiz1' -and $null -eq $DatabaseInfo.InstallLevel) {
+      if ($ArchiveInfo.FormatMajor -lt 15) {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallMate.Scope.GenerationUnmapped' -Source InstallMate -Message "InstallMate database $($ArchiveInfo.BuilderFormatVersion) was decoded, but its install-level record layout is not yet mapped; scope falls back to PE elevation evidence." -Kind Incomplete -Areas Metadata -AffectedFields Scope))
+      } else {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallMate.Scope.RecordUnresolved' -Source InstallMate -Message 'The InstallMate database did not contain one unambiguous supported install-level record; scope falls back to PE elevation evidence.' -Kind Incomplete -Areas Metadata -AffectedFields Scope))
+      }
     }
     if ($ScopeInfo.SupportsDualScope) {
       $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallMate.Scope.ElevationDependent' -Source InstallMate -Message 'This InstallMate package has elevation-dependent scope; confirm whether its command line can select scope before creating duplicate installer entries.' -Kind ManualValidation -Areas Metadata, Installability -AffectedFields Scope))
@@ -2193,11 +2204,12 @@ function Get-InstallMateInfo {
       Prerequisites                = $DatabaseInfo -and $DatabaseInfo.PSObject.Properties['Prerequisites'] ? $DatabaseInfo.Prerequisites : @()
       Services                     = $DatabaseInfo -and $DatabaseInfo.PSObject.Properties['Services'] ? $DatabaseInfo.Services : @()
       ServiceActions               = $DatabaseInfo -and $DatabaseInfo.PSObject.Properties['ServiceActions'] ? $DatabaseInfo.ServiceActions : @()
+      PackageDownloadUrl           = $DatabaseInfo -and $DatabaseInfo.PSObject.Properties['InstallRecord'] -and $DatabaseInfo.InstallRecord ? $DatabaseInfo.InstallRecord.PackageDownloadUrl : $null
       FileEntries                  = if ($DatabaseInfo) { $DatabaseInfo.FileRecords } else { @() }
       ExtractedFiles               = if ($DatabaseInfo) { @($DatabaseInfo.FileRecords | ForEach-Object { $_.RelativePath ? $_.RelativePath : $_.FileName }) } else { @() }
       CanExpand                    = $CanExpand
       FormatGeneration             = $ArchiveInfo.Signature -ceq 'tiz1' ? 'Legacy2' : 'Modern'
-      ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.InstallMate'; ParserMajor = 6; Sources = @('PE version resource and application manifest', 'bounded TIZ1 zlib/tzff Setup.ini records', 'bounded TIZ2 zlib records', 'bounded TIZ3 raw-LZMA records', 'bounded TIZ4 raw-LZMA2 records', 'typed tin symbol, folder, file, registry, environment, shortcut, execution, prerequisite, service, and service-control records', 'InstallMate shipped symbol definitions and setup documentation') }
+      ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.InstallMate'; ParserMajor = 6; Sources = @('PE version resource and application manifest', 'bounded TIZ1 zlib/tzff Setup.ini records', 'bounded TIZ2 zlib records', 'bounded TIZ3 raw-LZMA records', 'bounded TIZ4 raw-LZMA2 records', 'typed tin symbol, package, folder, file, registry, environment, shortcut, execution, prerequisite, service, and service-control records', 'InstallMate shipped symbol definitions and setup documentation') }
     }
   }
 }

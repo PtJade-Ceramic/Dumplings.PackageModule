@@ -14,6 +14,7 @@ BeforeAll {
   $Script:InstallMateWaybackDirectory = Resolve-DumplingsTestFixturePath -RelativePath 'Installers\InstallMate\Wayback'
   $Script:InstallMateRecordFixtureDirectory = Resolve-DumplingsTestFixturePath -RelativePath 'Builders\InstallMate\11\RecordScenarios'
   $Script:InstallMateServiceControlFixtureDirectory = Join-Path $Script:InstallMateRecordFixtureDirectory 'ServiceControls'
+  $Script:InstallMate94Fixture = Resolve-DumplingsTestFixturePath -RelativePath 'Builders\InstallMate\9.4.1\tin94.exe'
 }
 
 Describe 'InstallMate static parser' {
@@ -164,9 +165,37 @@ Describe 'InstallMate static parser' {
     $Info.DatabaseInfo.Signature | Should -Be 'tin9'
     $Info.DatabaseInfo.FileRecordCount | Should -Be 385
     $Info.ProductCode | Should -Be '{0A5E841E-2675-46A1-8F43-ED59D58C8339}'
+    @($Info.Components | Where-Object Name -CEQ 'Product').Count | Should -Be 1
+    @($Info.Components | Where-Object Name -CEQ 'Product')[0].DescriptionTranslationCount | Should -Be 1
     $Files.Count | Should -Be 1
     $Files[0].Length | Should -Be 2711
     (Get-DumplingsTestFixtureHash -Path $Files[0].FullName) | Should -Be '78DC4B88C418EF2765AA1748BBCAF48578A95093EEC816F7B0DEDB2131A76A65'
+  }
+
+  It 'Should decode the InstallMate 9 Loader + Download install record' {
+    $FixturePath = Join-Path $Script:InstallMateWaybackDirectory '20140211010128-tin3.exe'
+    if (-not (Test-Path -LiteralPath $FixturePath)) { Set-ItResult -Skipped -Because 'The InstallMate 9.10 Loader + Download fixture is not cached.'; return }
+    Get-DumplingsTestFixtureHash -Path $FixturePath | Should -Be '59B2C39D2F68C5AB073C56E61A8302CE61DF1A33EA1C8DE30E5A7591777A4D65'
+
+    $Info = Get-InstallMateInfo -Path $FixturePath
+    $Info.InstallLevel | Should -Be 4
+    $Info.InstallLevelName | Should -Be 'AllUsers'
+    $Info.Scope | Should -Be 'machine'
+    $Info.PackageDownloadUrl | Should -Be 'http://www.installmate.com/download/tiz9'
+    @($Info.Diagnostics.Id) | Should -Not -Contain 'InstallMate.Scope.GenerationUnmapped'
+  }
+
+  It 'Should retain translated product-component metadata in InstallMate 9.4' {
+    if (-not (Test-Path -LiteralPath $Script:InstallMate94Fixture)) { Set-ItResult -Skipped -Because 'The official InstallMate 9.4 fixture is not cached.'; return }
+    Get-DumplingsTestFixtureHash -Path $Script:InstallMate94Fixture | Should -Be '809B116772289DF9EC1620A8A5EB22D6E79EC40856E905EE1A1C82B620AE69DA'
+
+    $Info = Get-InstallMateInfo -Path $Script:InstallMate94Fixture
+    $ProductComponent = @($Info.Components | Where-Object Name -CEQ 'Product')
+    $ProductComponent.Count | Should -Be 1
+    $ProductComponent[0].Description | Should -Be 'This installs <ProductName>'
+    $ProductComponent[0].DescriptionTranslationCount | Should -Be 1
+    $Info.InstallLevel | Should -Be 4
+    @($Info.Diagnostics.Id) | Should -Not -Contain 'InstallMate.Scope.GenerationUnmapped'
   }
 
   It 'Should decode the controlled TIZ2 Zlib package route' {

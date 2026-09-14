@@ -88,6 +88,19 @@ Describe 'InstallForge compiled record parsing' {
     }
   }
 
+  It 'reports runtime-only values retained in custom command records' {
+    Mock Get-InstallForgeConfigurationText -ModuleName InstallForge { "Execute Application`r`n[RuntimeRoot]\probe.exe`r`n--output [RuntimeOutput]`r`n-wait`r`n" }
+    InModuleScope InstallForge {
+      $Diagnostics = [Collections.Generic.List[object]]::new()
+      $Commands = @(Get-InstallForgeCommandRecords -Layout ([pscustomobject]@{}) -Constant ([ordered]@{}) -Diagnostics $Diagnostics)
+      $Commands.Count | Should -Be 1
+      $Commands[0].HasUnresolvedRuntimeValue | Should -BeTrue
+      $Commands[0].UnresolvedProperties | Should -Be @('Command', 'Arguments')
+      $Diagnostics.Count | Should -Be 1
+      $Diagnostics[0].Id | Should -Be 'InstallForge.Command.RuntimeValueUnresolved'
+    }
+  }
+
   It 'normalizes custom ARP registry hives without inventing a registry view' {
     InModuleScope InstallForge {
       $Writes = @(
@@ -266,6 +279,7 @@ Describe 'InstallForge modern media' {
     $Info.Commands.WaitForExit | Should -Be @($true, $true)
     $Info.Commands.Hidden | Should -Be @($true, $false)
     $Info.Commands | ForEach-Object { $_.UnknownOptions.Count } | Should -Be @(0, 0)
+    $Info.Commands | ForEach-Object HasUnresolvedRuntimeValue | Should -Be @($false, $false)
     $Info.Shortcuts.AllUsers | Should -Be @($false, $false)
     $Info.Shortcuts.Scope | Should -Be @('user', 'user')
     $Info.Languages | Should -Be @('English', 'Deutsch')
