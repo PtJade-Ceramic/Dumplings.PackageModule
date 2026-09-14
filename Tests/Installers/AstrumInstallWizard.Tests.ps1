@@ -407,7 +407,7 @@ Describe 'Astrum InstallWizard metadata and ARP evidence' {
   }
 
   It 'decodes x64 registry, uninstaller, elevation, and requirement options' {
-    $Required = @('X64Mode.exe', 'NoUninstall.exe', 'RequireAdmin.exe', 'Requirements.exe', 'HiddenArp.exe') | ForEach-Object { Join-Path $Script:AstrumVariants $_ }
+    $Required = @('X64Mode.exe', 'NoUninstall.exe', 'RequireAdmin.exe', 'Requirements.exe', 'HiddenArp.exe', 'AsInvoker.exe') | ForEach-Object { Join-Path $Script:AstrumVariants $_ }
     if ($Required | Where-Object { -not (Test-Path -LiteralPath $_) }) { Set-ItResult -Skipped -Because 'The controlled Astrum option fixtures are not cached.'; return }
 
     (Get-AstrumInstallWizardInfo -Path $Required[0]).RegistryView | Should -Be '64-bit'
@@ -433,6 +433,12 @@ Describe 'Astrum InstallWizard metadata and ARP evidence' {
     $HiddenArp.ProductCode | Should -BeNullOrEmpty
     $HiddenArp.Scope | Should -Be 'machine'
     $HiddenArp.AppsAndFeaturesEntries | Should -BeNullOrEmpty
+
+    $AsInvoker = Get-AstrumInstallWizardInfo -Path $Required[5]
+    $AsInvoker.RequestedExecutionLevel | Should -Be 'asInvoker'
+    $AsInvoker.Scope | Should -Be 'machine'
+    $AsInvoker.ElevationRequirement | Should -Be 'elevationRequired'
+    $AsInvoker.Diagnostics.Id | Should -Contain 'Astrum.Elevation.CallerRequired'
   }
 
   It 'decodes Windows, Java, .NET, and display requirements without shifting later options' {
@@ -533,12 +539,16 @@ Describe 'Astrum installer analyzer and WinGet projection' {
     $WinGet.SuggestedManifestFields.ElevationRequirement | Should -Be 'elevationRequired'
   }
 
-  It 'projects only the exact VM-observed BreakAlube ProductCode' {
+  It 'projects the exact VM-observed BreakAlube ARP entry' {
     if (-not (Test-Path -LiteralPath $Script:BreakAlube)) { Set-ItResult -Skipped -Because 'The supplied BreakAlube installer is not cached.'; return }
     $WinGet = Get-WinGetInstallerAnalysis -Path $Script:BreakAlube
 
     $WinGet.SuggestedManifestFields.ProductCode | Should -Be 'PC-GINA V1.0.1.5'
-    $WinGet.SuggestedManifestFields.PSObject.Properties.Name | Should -Not -Contain 'AppsAndFeaturesEntries'
+    $WinGet.SuggestedManifestFields.AppsAndFeaturesEntries | Should -HaveCount 1
+    $WinGet.SuggestedManifestFields.AppsAndFeaturesEntries[0].ProductCode | Should -Be 'PC-GINA V1.0.1.5'
+    $WinGet.SuggestedManifestFields.AppsAndFeaturesEntries[0].DisplayName | Should -Be 'PC-GINA V1.0.1.5BreakAlube, PC-GINA, '
+    $WinGet.SuggestedManifestFields.AppsAndFeaturesEntries[0].DisplayVersion | Should -Be '1.0.1.5'
+    $WinGet.SuggestedManifestFields.AppsAndFeaturesEntries[0].Publisher | Should -Be 'Groeneveld transport efficiency b.v.'
   }
 
   It 'keeps silent suggestions for a compiled User Information dialog on Modern2 media' {
@@ -548,6 +558,15 @@ Describe 'Astrum installer analyzer and WinGet projection' {
 
     $WinGet.SuggestedManifestFields.InstallModes | Should -Be @('interactive', 'silent')
     $WinGet.SuggestedManifestFields.InstallerSwitches.Silent | Should -Be '/silent'
+  }
+
+  It 'projects caller elevation for as-invoker machine media' {
+    $AsInvoker = Join-Path $Script:AstrumVariants 'AsInvoker.exe'
+    if (-not (Test-Path -LiteralPath $AsInvoker)) { Set-ItResult -Skipped -Because 'The controlled Astrum as-invoker fixture is not cached.'; return }
+    $WinGet = Get-WinGetInstallerAnalysis -Path $AsInvoker
+
+    $WinGet.SuggestedManifestFields.Scope | Should -Be 'machine'
+    $WinGet.SuggestedManifestFields.ElevationRequirement | Should -Be 'elevationRequired'
   }
 
   It 'projects a source-backed silent switch from a legacy runtime option table' {

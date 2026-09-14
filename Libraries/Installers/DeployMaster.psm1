@@ -3525,6 +3525,13 @@ function Get-DeployMasterInfo {
       }
     }
     $InstallationItems = [object[]]@($InstallationFolders) + @($InstalledFiles) + @($Shortcuts) + @($UrlShortcuts)
+    $HelpLink = if (-not $NormalInstallSupported) {
+      $null
+    } elseif ([string]::IsNullOrWhiteSpace([string]$Identity.PackageUrl)) {
+      $Identity.PublisherUrl
+    } else {
+      $Identity.PackageUrl
+    }
 
     [pscustomobject][ordered]@{
       Path                                  = $File.FullName
@@ -3543,8 +3550,8 @@ function Get-DeployMasterInfo {
       UninstallString                       = $PrimaryRegistration ? $PrimaryRegistration.UninstallString : $null
       QuietUninstallString                  = $null
       DisplayIcon                           = $PrimaryRegistration ? $PrimaryRegistration.DisplayIcon : $null
-      HelpLink                              = $NormalInstallSupported ? $Identity.PackageUrl : $null
-      URLInfoUpdate                         = $NormalInstallSupported ? $Identity.PackageUrl : $null
+      HelpLink                              = $HelpLink
+      URLInfoUpdate                         = $HelpLink
       URLInfoAbout                          = $NormalInstallSupported ? $Identity.PublisherUrl : $null
       Diagnostics                           = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'DeployMaster' -Kind Incomplete -Areas Metadata))
       UnresolvedFields                      = $UnresolvedFields.ToArray()

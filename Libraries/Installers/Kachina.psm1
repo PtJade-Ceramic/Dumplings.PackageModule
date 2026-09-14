@@ -716,10 +716,12 @@ function Get-KachinaInfo {
     $Stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
     try {
       $Context = Get-KachinaAnalysisContext -File $File -Stream $Stream
-      $Warnings = [Collections.Generic.List[string]]::new()
+      # Payload helpers still return concise text because they operate below the
+      # parser-result boundary. Keep those messages isolated so they cannot
+      # inherit unrelated unresolved fields such as Source or Scope.
+      $PayloadMessages = [Collections.Generic.List[string]]::new()
       $Diagnostics = [Collections.Generic.List[object]]::new()
       foreach ($Diagnostic in $Context.Diagnostics) { $Diagnostics.Add($Diagnostic) }
-      $InformationMessages = [Collections.Generic.List[string]]::new()
       $UnresolvedFields = [Collections.Generic.List[string]]::new()
       $Config = $Context.Config
       $Metadata = $Context.Metadata
@@ -731,10 +733,16 @@ function Get-KachinaInfo {
       $UpdaterName = [string](Get-KachinaMapValue -Map $Config -Name 'updaterName' -DefaultValue 'update.exe')
       $ProgramFilesPath = [string](Get-KachinaMapValue -Map $Config -Name 'programFilesPath' -DefaultValue 'KachinaInstaller')
       $UacStrategy = [string](Get-KachinaMapValue -Map $Config -Name 'uacStrategy' -DefaultValue 'prefer-admin')
-      if ($UacStrategy -notin 'prefer-admin', 'prefer-user', 'force') { $Warnings.Add("Unknown Kachina UAC strategy '$UacStrategy'; supported scope evidence is conservative."); $UacStrategy = 'unknown' }
+      if ($UacStrategy -notin 'prefer-admin', 'prefer-user', 'force') {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'Kachina.Scope.UnknownUacStrategy' -Source 'Kachina' -Message "Unknown Kachina UAC strategy '$UacStrategy'; supported scope evidence is conservative." -Kind Unsupported -Areas Installability -AffectedFields @('Scope', 'ElevationRequirement') -Evidence $UacStrategy))
+        $UacStrategy = 'unknown'
+      }
       $DisplayVersion = if ($Metadata) { [string](Get-KachinaMapValue -Map $Metadata -Name 'tag_name') } else { $null }
       if ([string]::IsNullOrWhiteSpace($DisplayVersion)) { $DisplayVersion = $null; $UnresolvedFields.Add('DisplayVersion') }
-      if (-not $Metadata) { $UnresolvedFields.Add('PayloadFiles'); $InformationMessages.Add('This is a config-only Kachina updater; target version and payload evidence require the configured source.') }
+      if (-not $Metadata) {
+        $UnresolvedFields.Add('PayloadFiles')
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'Kachina.Payload.ConfigOnly' -Source 'Kachina' -Message 'This is a config-only Kachina updater; target version and payload evidence require the configured source.' -Kind Information -Areas Metadata, Extraction -AffectedFields @('DisplayVersion', 'PayloadFiles')))
+      }
 
       # Kachina originally accepted one source URI and later accepted an ordered source catalog.
       # Normalize both representations while retaining source IDs needed by the hidden --source selector.
@@ -749,7 +757,7 @@ function Get-KachinaInfo {
         foreach ($ConfiguredSourceItem in $ConfiguredSource) {
           $SourceUri = [string](Get-KachinaMapValue -Map $ConfiguredSourceItem -Name 'uri')
           if ([string]::IsNullOrWhiteSpace($SourceUri)) {
-            $Warnings.Add('Kachina contains a configured source entry without a URI.')
+            $Diagnostics.Add((New-InstallerDiagnostic -Id 'Kachina.Source.EntryWithoutUri' -Source 'Kachina' -Message 'Kachina contains a configured source entry without a URI.' -Kind Incomplete -Areas Metadata -AffectedFields Source -Evidence ([ordered]@{ Id = Get-KachinaMapValue -Map $ConfiguredSourceItem -Name 'id'; Name = Get-KachinaMapValue -Map $ConfiguredSourceItem -Name 'name' })))
             continue
           }
           $Sources.Add([pscustomobject][ordered]@{
@@ -762,7 +770,10 @@ function Get-KachinaInfo {
         }
       }
       $Source = $Sources.Count -gt 0 ? $Sources[0].Uri : $null
-      if (-not $Source) { $UnresolvedFields.Add('Source'); $Warnings.Add('Kachina does not expose a usable update source URI.') }
+      if (-not $Source) {
+        $UnresolvedFields.Add('Source')
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'Kachina.Source.Unresolved' -Source 'Kachina' -Message 'Kachina does not expose a usable update source URI.' -Kind Incomplete -Areas Metadata -AffectedFields Source))
+      }
 
       $UserDataPaths = @((Get-KachinaMapValue -Map $Config -Name 'userDataPath' -DefaultValue @()) | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
       $IgnoredUpdatePaths = @((Get-KachinaMapValue -Map $Config -Name 'ignoreFolderPath' -DefaultValue @()) | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
@@ -772,7 +783,9 @@ function Get-KachinaInfo {
 
       $SupportedScopes = $UacStrategy -eq 'force' ? @('machine') : @('machine', 'user')
       $Scope = 'machine'
-      if ($UacStrategy -ne 'force') { $InformationMessages.Add("Kachina defaults to Program Files and machine scope; '$UacStrategy' can use user scope when -D selects an eligible user-writable path.") }
+      if ($UacStrategy -ne 'force') {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'Kachina.Scope.InstallLocationDependent' -Source 'Kachina' -Message "Kachina defaults to Program Files and machine scope; '$UacStrategy' can use user scope when -D selects an eligible user-writable path." -Kind Information -Areas Installability -AffectedFields @('Scope', 'ElevationRequirement') -Evidence $UacStrategy))
+      }
       $DefaultInstallLocation = '%ProgramFiles%\' + $ProgramFilesPath.TrimStart('\', '/')
       $UninstallString = "$DefaultInstallLocation\$UninstallName"
       $DisplayIcon = "$DefaultInstallLocation\$ExeName"
@@ -803,9 +816,9 @@ function Get-KachinaInfo {
       $AssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite @($RegistryWrites)
       foreach ($Diagnostic in $AssociationInfo.Diagnostics) { $Diagnostics.Add($Diagnostic) }
 
-      $Catalog = @(Get-KachinaPayloadCatalog -Context $Context -Warnings $Warnings)
+      $Catalog = @(Get-KachinaPayloadCatalog -Context $Context -Warnings $PayloadMessages)
       $Patches = @(Get-KachinaPatchCatalog -Context $Context)
-      $PayloadEvidence = Get-KachinaPayloadEvidence -Context $Context -Catalog $Catalog -ExeName $ExeName -Warnings $Warnings
+      $PayloadEvidence = Get-KachinaPayloadEvidence -Context $Context -Catalog $Catalog -ExeName $ExeName -Warnings $PayloadMessages
       if (@($PayloadEvidence.Architectures).Count -eq 0) { $UnresolvedFields.Add('PayloadArchitecture') }
       $ConfiguredRuntimes = @((Get-KachinaMapValue -Map $Config -Name 'runtimes' -DefaultValue @()) | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
       $EmbeddedRuntimePackages = @($Context.Records | Where-Object { $_.Name -match '^Microsoft\.(?:DotNet|VCRedist)\.' } | ForEach-Object { [pscustomobject]@{ PackageIdentifier = $_.Name; Offset = $_.DataOffset; Length = $_.Length; Delivery = 'Raw appended installer' } })
@@ -813,7 +826,9 @@ function Get-KachinaInfo {
           $Identifier = $_
           [pscustomobject]@{ PackageIdentifier = $Identifier; IsConfigured = $true; IsEmbedded = [bool]($EmbeddedRuntimePackages | Where-Object PackageIdentifier -CEQ $Identifier | Select-Object -First 1) }
         })
-      if ($ConfiguredRuntimes.Count -gt 0) { $InformationMessages.Add('Kachina can install its configured runtime prerequisites itself; dependency evidence is returned without mutating manifest Dependencies.') }
+      if ($ConfiguredRuntimes.Count -gt 0) {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'Kachina.Dependencies.RuntimePackages' -Source 'Kachina' -Message 'Kachina can install its configured runtime prerequisites itself; dependency evidence is returned without mutating manifest Dependencies.' -Kind Information -Areas Installability -AffectedFields Dependencies -Evidence $RuntimePackages))
+      }
 
       $AppsAndFeaturesEntry = [ordered]@{ ProductCode = $ProductCode; DisplayName = $DisplayName; Publisher = $Publisher; InstallerType = 'exe' }
       if ($DisplayVersion) { $AppsAndFeaturesEntry.DisplayVersion = $DisplayVersion }
@@ -923,8 +938,7 @@ function Get-KachinaInfo {
         Diagnostics                    = @(
           Merge-InstallerDiagnostics -Diagnostic @(
             $Diagnostics
-            @(ConvertTo-InstallerDiagnostic -InputObject @($Warnings) -Source 'Kachina' -Kind Incomplete -Areas Metadata -AffectedFields $UnresolvedFields)
-            @(ConvertTo-InstallerDiagnostic -InputObject @($InformationMessages) -Source 'Kachina' -Kind Information -Areas Metadata)
+            @(ConvertTo-InstallerDiagnostic -InputObject @($PayloadMessages) -Source 'Kachina' -Kind Incomplete -Areas Metadata, Extraction -AffectedFields @('PayloadFiles', 'PayloadArchitecture', 'Dependencies'))
           )
         )
         UnresolvedFields               = @($UnresolvedFields | Sort-Object -Unique)

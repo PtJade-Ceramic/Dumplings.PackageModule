@@ -191,23 +191,33 @@ Describe 'Installer manifest behavior defaults' {
     }
   }
 
-  It 'Should not advertise silent-with-progress behavior for Setup Factory' {
+  It 'Should defer Setup Factory silent behavior to exact parser evidence' {
     InModuleScope WinGetAnalysis {
       $Fields = (Get-WinGetInstallerFamilySuggestion -Family 'Setup Factory').ManifestFields
 
-      $Fields.InstallModes | Should -Be @('interactive', 'silent')
-      $Fields.InstallerSwitches.Silent | Should -Be '/S'
-      $Fields.InstallerSwitches.PSObject.Properties.Name | Should -Not -Contain 'SilentWithProgress'
+      $Fields.PSObject.Properties.Name | Should -Not -Contain 'InstallModes'
+      $Fields.PSObject.Properties.Name | Should -Not -Contain 'InstallerSwitches'
+
+      $Enabled = Get-WinGetParserResultSuggestion -Result ([pscustomobject]@{ Family = 'Setup Factory'; InstallerType = 'exe'; Metadata = [pscustomobject]@{ SupportsSilentInstallation = $true; InstallModes = @('interactive', 'silent'); InstallerSwitches = [ordered]@{ Silent = '/S' } } })
+      $Disabled = Get-WinGetParserResultSuggestion -Result ([pscustomobject]@{ Family = 'Setup Factory'; InstallerType = 'exe'; Metadata = [pscustomobject]@{ SupportsSilentInstallation = $false; InstallModes = @('interactive'); InstallerSwitches = [ordered]@{} } })
+
+      $Enabled.ManifestFields.InstallModes | Should -Be @('interactive', 'silent')
+      $Enabled.ManifestFields.InstallerSwitches.Silent | Should -Be '/S'
+      $Disabled.ManifestFields.InstallModes | Should -Be @('interactive')
+      $Disabled.ManifestFields.PSObject.Properties.Name | Should -Not -Contain 'InstallerSwitches'
+      $Disabled.SuggestedNextSteps | Should -Contain 'This Setup Factory artifact is interactive-only because its generation predates silent mode or its compiled project disables the feature; do not add /S.'
     }
   }
 
-  It 'Should mirror documented Wise and Qt IFW installer-level fields' {
+  It 'Should defer route-specific Wise and Qt IFW behavior to exact parser evidence' {
     InModuleScope WinGetAnalysis {
       $Wise = (Get-WinGetInstallerFamilySuggestion -Family 'Wise').ManifestFields
       $Qt = (Get-WinGetInstallerFamilySuggestion -Family 'Qt Installer Framework').ManifestFields
 
-      $Wise.Scope | Should -Be 'machine'
-      $Wise.InstallerSwitches.InstallLocation | Should -Be 'INSTALLDIR="<INSTALLPATH>"'
+      $Wise.InstallerType | Should -Be 'exe'
+      $Wise.PSObject.Properties.Name | Should -Not -Contain 'Scope'
+      $Wise.PSObject.Properties.Name | Should -Not -Contain 'InstallerSwitches'
+      $Wise.PSObject.Properties.Name | Should -Not -Contain 'InstallModes'
       $Qt.InstallerType | Should -Be 'exe'
       $Qt.PSObject.Properties.Name | Should -Not -Contain 'InstallerSwitches'
       $Qt.PSObject.Properties.Name | Should -Not -Contain 'InstallModes'
@@ -221,6 +231,23 @@ Describe 'Installer manifest behavior defaults' {
       $DeployMaster.InstallModes | Should -Be @('interactive', 'silent')
       $DeployMaster.InstallerSwitches.Silent | Should -Be '/silent'
       $DeployMaster.InstallerSwitches.PSObject.Properties.Name | Should -Not -Contain 'SilentWithProgress'
+    }
+  }
+
+  It 'Should replace DeployMaster family defaults with exact classic runtime evidence' {
+    InModuleScope WinGetAnalysis {
+      $Classic = Get-WinGetParserResultSuggestion -Result ([pscustomobject]@{
+          Family        = 'DeployMaster'
+          InstallerType = 'exe'
+          Metadata      = [pscustomobject]@{
+            InstallModes       = @('interactive')
+            InstallerSwitches  = [ordered]@{}
+            SupportsDualScope  = $false
+          }
+        })
+
+      $Classic.ManifestFields.InstallModes | Should -Be @('interactive')
+      $Classic.ManifestFields.PSObject.Properties.Name | Should -Not -Contain 'InstallerSwitches'
     }
   }
 
@@ -507,6 +534,31 @@ Describe 'WinGet installer analyzer content detection' {
     }
   }
 
+  It 'Should keep the full Velopack package version separate from its ARP version' {
+    InModuleScope InstallerAnalyzer {
+      Mock Get-SquirrelInfo {
+        [pscustomobject]@{
+          Family                 = 'Velopack'
+          Confidence             = 'high'
+          PackageVersion         = '1.2.3-beta.4+build.7'
+          DisplayVersion         = '1.2.3'
+          DisplayName            = 'Versioned App'
+          Publisher              = 'Example Publisher'
+          ProductCode            = 'VersionedApp'
+          Scope                  = 'user'
+          AppsAndFeaturesEntries = @([pscustomobject]@{ ProductCode = 'VersionedApp'; DisplayVersion = '1.2.3' })
+        }
+      }
+
+      $Candidate = [pscustomobject]@{ Family = 'Velopack'; Confidence = 'high' }
+      $ParserResult = @(Invoke-InstallerExeParser -InstallerPath 'versioned-velopack.exe' -FamilyCandidates @($Candidate) -ExtractEmbeddedMsi:$false |
+          Where-Object { $_.Name -eq 'Squirrel/Velopack' -and $_.Success })[0].Result
+
+      $ParserResult.ProductVersion | Should -Be '1.2.3-beta.4+build.7'
+      $ParserResult.AppsAndFeaturesEntries[0].DisplayVersion | Should -Be '1.2.3'
+    }
+  }
+
   It 'Should expose the configured nested launcher for WinRAR GUI SFX installers' {
     $Installer = Get-AnalyzerInstallerFixture -Name 'Lakes_SCREENView_4.0.1.exe' -Url 'https://www.weblakes.com/products/screen/update/Lakes_Environmental_SCREEN_View_V.4.0.1_Install.exe'
 
@@ -667,7 +719,7 @@ Describe 'WinGet installer analyzer content detection' {
     $Fields.PSObject.Properties.Name | Should -Not -Contain 'InstallerSwitches'
   }
 
-  It 'Should route CreateInstall markers to its family defaults' {
+  It 'Should route CreateInstall markers without inventing project-specific behavior' {
     $FixturePath = Join-Path $Script:FixtureDirectory 'CreateInstall-marker.exe'
     [System.IO.File]::WriteAllText($FixturePath, 'MZ CreateInstall Novostrim .ciq')
     $Module = Get-Module InstallerAnalyzer
@@ -680,8 +732,33 @@ Describe 'WinGet installer analyzer content detection' {
 
     $Candidate.Family | Should -Be 'CreateInstall'
     $Defaults = & (Get-Module WinGetAnalysis) { (Get-WinGetInstallerFamilySuggestion -Family 'CreateInstall').ManifestFields }
-    $Defaults.Scope | Should -Be 'machine'
-    $Defaults.InstallerSwitches.Silent | Should -Be '-silent'
+    $Defaults.InstallerType | Should -Be 'exe'
+    $Defaults.PSObject.Properties.Name | Should -Not -Contain 'Scope'
+    $Defaults.PSObject.Properties.Name | Should -Not -Contain 'InstallModes'
+    $Defaults.PSObject.Properties.Name | Should -Not -Contain 'InstallerSwitches'
+    $Defaults.PSObject.Properties.Name | Should -Not -Contain 'UpgradeBehavior'
+  }
+
+  It 'Should project only exact CreateInstall modes and switches' {
+    InModuleScope WinGetAnalysis {
+      $Interactive = Get-WinGetParserResultSuggestion -Result ([pscustomobject]@{
+          Family = 'CreateInstall'; InstallerType = 'exe'; Metadata = [pscustomobject]@{
+            Scope = $null; InstallModes = @('interactive'); InstallerSwitches = [ordered]@{}
+          }
+        })
+      $Silent = Get-WinGetParserResultSuggestion -Result ([pscustomobject]@{
+          Family = 'CreateInstall'; InstallerType = 'exe'; Metadata = [pscustomobject]@{
+            Scope = 'machine'; InstallModes = @('interactive', 'silent', 'silentWithProgress'); InstallerSwitches = [ordered]@{ Silent = '/compiled'; SilentWithProgress = '/compiled' }
+          }
+        })
+
+      $Interactive.ManifestFields.InstallModes | Should -Be @('interactive')
+      $Interactive.ManifestFields.PSObject.Properties.Name | Should -Not -Contain 'InstallerSwitches'
+      $Interactive.ManifestFields.PSObject.Properties.Name | Should -Not -Contain 'Scope'
+      $Silent.ManifestFields.Scope | Should -Be 'machine'
+      $Silent.ManifestFields.InstallModes | Should -Be @('interactive', 'silent', 'silentWithProgress')
+      $Silent.ManifestFields.InstallerSwitches.Silent | Should -Be '/compiled'
+    }
   }
 
   It 'Should keep CreateInstall text inside Codeg as a rejected route after NSIS succeeds' {

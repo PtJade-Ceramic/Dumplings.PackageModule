@@ -47,15 +47,39 @@ Describe 'Installer bridge' {
     $Info.DisplayVersion | Should -Be '2.0'
     $Info.ProductCode | Should -Be 'OutCALL2.0'
     $Info.Scope | Should -Be 'machine'
+    $Info.SupportsSilentInstallation | Should -BeTrue
+    $Info.InstallModes | Should -Be @('interactive', 'silent')
+    $Info.InstallerSwitches.Silent | Should -Be '/S'
+  }
+
+  It 'Should preserve Setup Factory 3.1 companion-media evidence through the bridge' {
+    $Archive = Resolve-DumplingsTestFixturePath -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'SetupFactory-3.1-builder.zip')
+    if (-not (Test-Path -LiteralPath $Archive -PathType Leaf)) { Set-ItResult -Skipped -Because 'The historical Setup Factory 3.1 fixture is not available'; return }
+    $MediaRoot = Join-Path $TestDrive 'setup-factory-31-bridge'
+    $null = New-Item -ItemType Directory -Path $MediaRoot -Force
+    [IO.Compression.ZipFile]::ExtractToDirectory($Archive, $MediaRoot, $true)
+
+    $Info = Get-SetupFactoryInfo -Path (Join-Path $MediaRoot 'SETUP.EXE')
+    $Extracted = @(Expand-SetupFactoryInstaller -Path (Join-Path $MediaRoot 'IRDATA.IRD') -DestinationPath (Join-Path $TestDrive 'setup-factory-31-bridge-output') -Name 'DEFAULT.SFP' -CollisionAction Error)
+
+    $Info.ParserVersionInfo.ProfileId | Should -BeExactly 'setup-factory-3.1-multifile'
+    $Info.DisplayName | Should -BeExactly 'Setup Factory 3.1 Demo'
+    $Info.DefaultInstallLocation | Should -BeExactly 'C:\SUF310EV'
+    $Info.PayloadCatalog | Should -HaveCount 15
+    $Info.InstallModes | Should -Be @('interactive')
+    $Extracted | Should -HaveCount 1
+    (Get-Item -LiteralPath $Extracted[0]).Length | Should -Be 813
   }
 
   It 'Should preserve Setup Factory structural profiles and legacy metadata through the bridge' {
     $ModernFixture = Resolve-DumplingsTestFixturePath -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'SetupFactory-10.2.0-trial.exe')
     $LegacyFixture = Resolve-DumplingsTestFixturePath -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'SetupFactory-6.0.1.4-builder.exe')
-    if (-not (Test-Path -LiteralPath $ModernFixture) -or -not (Test-Path -LiteralPath $LegacyFixture)) { Set-ItResult -Skipped -Because 'The Setup Factory profile fixtures are not available'; return }
+    $Version5Fixture = Resolve-DumplingsTestFixturePath -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'SetupFactory-5.0.1.6-builder.exe')
+    if (-not (Test-Path -LiteralPath $ModernFixture) -or -not (Test-Path -LiteralPath $LegacyFixture) -or -not (Test-Path -LiteralPath $Version5Fixture)) { Set-ItResult -Skipped -Because 'The Setup Factory profile fixtures are not available'; return }
 
     $Modern = Get-SetupFactoryInfo -Path $ModernFixture
     $Legacy = Get-SetupFactoryInfo -Path $LegacyFixture
+    $Version5 = Get-SetupFactoryInfo -Path $Version5Fixture
 
     $Modern.ParserVersionInfo.ProfileId | Should -Be 'setup-factory-8-plus'
     $Modern.ParserVersionInfo.BuilderVersion | Should -Be '10.2.0.0'
@@ -63,7 +87,12 @@ Describe 'Installer bridge' {
     $Modern.EmbeddedRuntimeInfo.IsTrusted | Should -BeTrue
     $Modern.EmbeddedRuntimeInfo.IsProfileCompatible | Should -BeTrue
     $Modern.PayloadCatalog.Count | Should -Be 1258
-    $Modern.InstalledFileCatalog.CompressionPrefixLength | Should -Be 1
+    $Modern.InstalledFileCatalog.DestinationPolicyLength | Should -Be 11
+    $Modern.InstalledFileCatalog.HasAppUserModelID | Should -BeTrue
+    $Modern.PayloadCatalog[0].Policy.OverwritePolicy | Should -BeExactly 'Older'
+    $Modern.FilePolicySummary.EntryCount | Should -Be 1258
+    $Modern.SupportsSilentInstallation | Should -BeTrue
+    $Modern.InstallerSwitches.Silent | Should -Be '/S'
     $Legacy.ParserVersionInfo.ProfileId | Should -Be 'setup-factory-6'
     $Legacy.ParserVersionInfo.MetadataRoute | Should -Be 'irdat-v6'
     $Legacy.ContainerEntries.Name | Should -Contain 'irsetup.dat'
@@ -73,6 +102,21 @@ Describe 'Installer bridge' {
     $Legacy.ProductCode | Should -Be 'Setup Factory 6.0 Demo'
     $Legacy.UninstallConfiguration.IncludeUninstall | Should -BeTrue
     $Legacy.UnresolvedFields | Should -Not -Contain 'ProductCode'
+    $Legacy.SupportsSilentInstallation | Should -BeTrue
+    $Legacy.InstallModes | Should -Be @('interactive', 'silent')
+    $Legacy.InstallerSwitches.Silent | Should -Be '/S'
+    $Legacy.LegacyActionCatalog.Entries | Should -HaveCount 136
+    @($Legacy.LegacyActionCatalog.Entries | Where-Object { -not $_.ActionName }) | Should -HaveCount 0
+    $Legacy.ExecutionActions | Should -HaveCount 4
+    $Legacy.ActionEffects.UnknownActions | Should -HaveCount 0
+    $Legacy.Diagnostics.Id | Should -Not -Contain 'SetupFactory.Installability.SilentSupportUnresolved'
+    $Version5.ParserVersionInfo.ProfileId | Should -Be 'setup-factory-5'
+    $Version5.LegacyActionCatalog.IsComplete | Should -BeTrue
+    $Version5.ExecutionActions | Should -HaveCount 2
+    $Version5.FileSystemActions | Should -HaveCount 6
+    $Version5.VariableReads | Should -HaveCount 3
+    $Version5.ExecutionActions[1].Target | Should -BeExactly '%AppDir%\builder.exe'
+    $Version5.VariableReads[0].ValueName | Should -BeExactly 'InstallPath'
   }
 
   It 'Should forward Setup Factory raw-entry extraction through the bridge' {

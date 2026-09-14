@@ -40,7 +40,7 @@
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
 $Script:CreateInstallFormatCatalog = Import-PowerShellDataFile -LiteralPath (Join-Path $PSScriptRoot 'CreateInstallFormatCatalog.psd1')
-if ([int]$Script:CreateInstallFormatCatalog.CatalogVersion -ne 4) { throw "Unsupported CreateInstall format catalog version '$($Script:CreateInstallFormatCatalog.CatalogVersion)'." }
+if ([int]$Script:CreateInstallFormatCatalog.CatalogVersion -ne 5) { throw "Unsupported CreateInstall format catalog version '$($Script:CreateInstallFormatCatalog.CatalogVersion)'." }
 
 $Script:CreateInstallMaximumHeaderBytes = 268435456
 $Script:CreateInstallMaximumInfoBytes = 268435456
@@ -831,6 +831,15 @@ function Find-CreateInstallOperationRoutine {
           if (@($StringLiterals | Where-Object { $_.Contains($Fragment, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 0) { return $false }
         }
       }
+      # Some Gentee routines share parameter counts and marker strings. Match the complete literal
+      # sequence only for source-backed profiles whose command order is part of the route identity.
+      if ($OperationProfile.ContainsKey('ExactStringLiterals')) {
+        $ExpectedLiterals = [string[]]$OperationProfile.ExactStringLiterals
+        if ($StringLiterals.Count -ne $ExpectedLiterals.Count) { return $false }
+        for ($LiteralIndex = 0; $LiteralIndex -lt $ExpectedLiterals.Count; $LiteralIndex++) {
+          if ($StringLiterals[$LiteralIndex] -cne $ExpectedLiterals[$LiteralIndex]) { return $false }
+        }
+      }
       $ExternalNames = if ($Function.PSObject.Properties['ExternalCalls']) { [string[]]@($Function.ExternalCalls.Name) } else { [string[]]@() }
       if ($OperationProfile.ContainsKey('RequiredExternalCalls')) { foreach ($Name in [string[]]$OperationProfile.RequiredExternalCalls) { if ($ExternalNames -inotcontains $Name) { return $false } } }
       if ($OperationProfile.ContainsKey('ForbiddenExternalCalls')) { foreach ($Name in [string[]]$OperationProfile.ForbiddenExternalCalls) { if ($ExternalNames -icontains $Name) { return $false } } }
@@ -1212,7 +1221,7 @@ function Get-CreateInstallListCallEvidence {
 function Get-CreateInstallEnvironmentEvidence {
   <#
   .SYNOPSIS
-    Recover deterministic CreateInstall environment-variable set and ambiguous append/delete operations.
+    Recover deterministic CreateInstall environment-variable set, append, and delete operations.
   .PARAMETER Program
     Decoded GE program returned by Get-CreateInstallGenteeProgram.
   .PARAMETER ProjectVariableEvidence
@@ -1228,16 +1237,19 @@ function Get-CreateInstallEnvironmentEvidence {
   )
 
   $Functions = Get-CreateInstallFunctionIndex -Program $Program
-  # globsets writes a list of complete values. The four-parameter globappend and globdel routines
-  # retain the same Environment/g_append fingerprints, so static evidence must not claim which
-  # mutation occurs unless a future source-backed bytecode fingerprint separates them.
+  # globsets writes a list of complete values. Current globappend and globdel routines have
+  # source-backed literal sequences that distinguish the ordinary read/append route from the
+  # delete route's additional HKCU registry read. Unknown sequences remain ambiguous.
   $SetTargets = [uint32[]]@($Functions.Values | Where-Object {
       $_.ParameterCount -eq 1 -and $_.LiteralText.Contains('Environment', [StringComparison]::Ordinal) -and -not $_.LiteralText.Contains('g_append', [StringComparison]::Ordinal)
     } | ForEach-Object { [uint32]$_.Record.Id })
-  $AppendTargets = [Collections.Generic.HashSet[uint32]]::new([uint32[]]@($Functions.Values | Where-Object {
-        $_.ParameterCount -eq 4 -and $_.LiteralText.Contains('Environment', [StringComparison]::Ordinal) -and $_.LiteralText.Contains('g_append', [StringComparison]::Ordinal)
-      } | ForEach-Object { [uint32]$_.Record.Id }))
-  if ($SetTargets.Count -eq 0 -and $AppendTargets.Count -eq 0) { return [pscustomobject]@{ EnvironmentChanges = @(); Diagnostics = @() } }
+  $AppendTargets = [Collections.Generic.HashSet[uint32]]::new([uint32[]]@((Find-CreateInstallOperationRoutine -Program $Program -ProfileId 'EnvironmentAppend4').Record.Id))
+  $RemoveTargets = [Collections.Generic.HashSet[uint32]]::new([uint32[]]@((Find-CreateInstallOperationRoutine -Program $Program -ProfileId 'EnvironmentDelete4').Record.Id))
+  $MutationTargets = [Collections.Generic.HashSet[uint32]]::new()
+  foreach ($Function in $Functions.Values | Where-Object {
+      $_.ParameterCount -eq 4 -and $_.LiteralText.Contains('Environment', [StringComparison]::Ordinal) -and $_.LiteralText.Contains('g_append', [StringComparison]::Ordinal)
+    }) { $null = $MutationTargets.Add([uint32]$Function.Record.Id) }
+  if ($SetTargets.Count -eq 0 -and $MutationTargets.Count -eq 0) { return [pscustomobject]@{ EnvironmentChanges = @(); Diagnostics = @() } }
   $Changes = [Collections.Generic.List[object]]::new()
   $Diagnostics = [Collections.Generic.List[object]]::new()
 
@@ -1267,17 +1279,18 @@ function Get-CreateInstallEnvironmentEvidence {
     }
   }
 
-  if ($AppendTargets.Count -gt 0) {
+  if ($MutationTargets.Count -gt 0) {
     foreach ($Function in $Functions.Values) {
       $Commands = $Function.Commands
       for ($CommandIndex = 1; $CommandIndex -lt $Commands.Count; $CommandIndex++) {
         $RoutineId = [uint32]$Commands[$CommandIndex].Command
-        if (-not $AppendTargets.Contains($RoutineId)) { continue }
+        if (-not $MutationTargets.Contains($RoutineId)) { continue }
         $Window = @($Commands[[Math]::Max(0, $CommandIndex - 48)..($CommandIndex - 1)])
         $Strings = @($Window | Where-Object Command -EQ 34 | Select-Object -Last 3)
         $Integers = @($Window | Where-Object { $_.Command -in @(25, 26, 27) -and $_.Operand -is [ValueType] } | Select-Object -Last 1)
         if ($Strings.Count -ne 3 -or $Integers.Count -ne 1) { continue }
-        & $AddChange 'AppendOrRemove' ([uint32]$Function.Record.Id) $RoutineId ([int]$Commands[$CommandIndex].Offset) $null $null ([string]$Strings[0].Operand) ([string]$Strings[1].Operand) ([int][uint32]$Integers[0].Operand) $Is32Bit ([string]$Strings[2].Operand)
+        $Operation = if ($AppendTargets.Contains($RoutineId)) { 'Append' } elseif ($RemoveTargets.Contains($RoutineId)) { 'Remove' } else { 'AppendOrRemove' }
+        & $AddChange $Operation ([uint32]$Function.Record.Id) $RoutineId ([int]$Commands[$CommandIndex].Offset) $null $null ([string]$Strings[0].Operand) ([string]$Strings[1].Operand) ([int][uint32]$Integers[0].Operand) $Is32Bit ([string]$Strings[2].Operand)
       }
     }
   }
@@ -1285,7 +1298,7 @@ function Get-CreateInstallEnvironmentEvidence {
   $Conditional = @($Changes | Where-Object { $null -eq $_.Condition -or $_.UnresolvedMacros.Count -gt 0 })
   if ($Conditional.Count) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.Environment.Conditional' -Source CreateInstall -Message "$($Conditional.Count) CreateInstall environment-variable operation(s) depend on runtime conditions or macros." -Kind Ambiguous -Areas Metadata -Evidence $Conditional)) }
   $AmbiguousMutations = @($Changes | Where-Object Operation -EQ 'AppendOrRemove')
-  if ($AmbiguousMutations.Count) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.Environment.AppendDeleteAmbiguous' -Source CreateInstall -Message "$($AmbiguousMutations.Count) CreateInstall environment-variable mutation(s) may append or remove a value; the compiled routines have the same stable structural signature." -Kind Ambiguous -Areas Metadata -Evidence $AmbiguousMutations)) }
+  if ($AmbiguousMutations.Count) { $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.Environment.AppendDeleteAmbiguous' -Source CreateInstall -Message "$($AmbiguousMutations.Count) CreateInstall environment-variable mutation(s) use an unrecognized compiled routine and may append or remove a value." -Kind Ambiguous -Areas Metadata -Evidence $AmbiguousMutations)) }
   return [pscustomobject]@{ EnvironmentChanges = $Changes.ToArray(); Diagnostics = $Diagnostics.ToArray() }
 }
 
@@ -2132,19 +2145,52 @@ function Get-CreateInstallRegistryEvidence {
           3 { [string[]]@(([string]$ValueResult.Value) -split '\|'); break }
           default { [string]$ValueResult.Value }
         }
-        $Write = [pscustomobject]@{ Root = $RootNames[$RootValue]; RegistryView = $Call.RegistryView; Key = [string]$Subkey.Value; Name = [string]$NameResult.Value; Value = $Value; Type = $TypeNames[$TypeCode]; Evidence = "Gentee regsetsex call in object $($Record.Id)"; IsConditional = $IsConditional; ConditionExpression = @($OuterExpression, $RowExpression) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } }
+        $Write = [pscustomobject]@{ Root = $RootNames[$RootValue]; RegistryView = $Call.RegistryView; Key = [string]$Subkey.Value; Name = [string]$NameResult.Value; Value = $Value; Type = $TypeNames[$TypeCode]; Evidence = "Gentee regsetsex call in object $($Record.Id)"; IsConditional = $IsConditional; ConditionExpression = @($OuterExpression, $RowExpression) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }; UnresolvedKeyMacros = @($Subkey.UnresolvedMacros) }
         if ($IsConditional) {
           $ConditionalWrites.Add($Write)
-          $DynamicConditions.Add([pscustomobject]@{ CallerId = $Record.Id; Root = $Write.Root; Key = $Write.Key; Name = $Write.Name; Conditions = $Write.ConditionExpression; UnresolvedMacros = @($Subkey.UnresolvedMacros + $NameResult.UnresolvedMacros + $ValueResult.UnresolvedMacros) })
+          $DynamicConditions.Add([pscustomobject]@{ CallerId = $Record.Id; Root = $Write.Root; Key = $Write.Key; Name = $Write.Name; Conditions = $Write.ConditionExpression; UnresolvedKeyMacros = @($Subkey.UnresolvedMacros); UnresolvedMacros = @($Subkey.UnresolvedMacros + $NameResult.UnresolvedMacros + $ValueResult.UnresolvedMacros) })
         } else { $Writes.Add($Write) }
       }
     }
   }
 
   $Diagnostics = @(
-    if ($DynamicConditions.Count) { New-InstallerDiagnostic -Id 'CreateInstall.Registry.Conditional' -Source CreateInstall -Message "$($DynamicConditions.Count) CreateInstall registry value(s) depend on runtime conditions or macros and are retained separately from deterministic registry writes." -Kind Ambiguous -Areas Metadata -AffectedFields @('ProductCode', 'Protocols', 'FileExtensions') -Evidence $DynamicConditions.ToArray() }
+    if ($DynamicConditions.Count) {
+      $AffectedFields = [string[]]@($DynamicConditions | ForEach-Object { Get-CreateInstallRegistryAffectedField -Root $_.Root -Key $_.Key -UnresolvedMacros $_.UnresolvedKeyMacros } | Sort-Object -Unique)
+      New-InstallerDiagnostic -Id 'CreateInstall.Registry.Conditional' -Source CreateInstall -Message "$($DynamicConditions.Count) CreateInstall registry value(s) depend on runtime conditions or macros and are retained separately from deterministic registry writes." -Kind Ambiguous -Areas Metadata -AffectedFields $AffectedFields -Evidence $DynamicConditions.ToArray()
+    }
   )
   return [pscustomobject]@{ Calls = $Calls.ToArray(); RegistryWrites = $Writes.ToArray(); ConditionalRegistryWrites = $ConditionalWrites.ToArray(); Diagnostics = $Diagnostics }
+}
+
+function Get-CreateInstallRegistryAffectedField {
+  <#
+  .SYNOPSIS
+    Map a resolved CreateInstall registry destination to parser-managed manifest fields.
+  .PARAMETER Root
+    Registry root emitted by the compiled regsetsex call.
+  .PARAMETER Key
+    Resolved registry subkey. A key containing unresolved macros is treated conservatively.
+  .PARAMETER UnresolvedMacros
+    Macro names that prevented the parser from proving the final subkey.
+  #>
+  [OutputType([string[]])]
+  param (
+    [AllowNull()][string]$Root,
+    [AllowNull()][string]$Key,
+    [AllowNull()][string[]]$UnresolvedMacros
+  )
+
+  if (($null -ne $UnresolvedMacros -and $UnresolvedMacros.Count -gt 0) -or [string]::IsNullOrWhiteSpace($Key) -or $Key -match '#[^#]+#') {
+    return [string[]]@('ProductCode', 'AppsAndFeaturesEntries', 'Protocols', 'FileExtensions')
+  }
+  if ($Key -match '(?i)^Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\') {
+    return [string[]]@('ProductCode', 'AppsAndFeaturesEntries')
+  }
+  if ($Root -ceq 'HKCR' -or $Key -match '(?i)^Software\\Classes(?:\\|$)') {
+    return [string[]]@('Protocols', 'FileExtensions')
+  }
+  return [string[]]@()
 }
 
 function Get-CreateInstallArpEvidence {
@@ -3130,7 +3176,9 @@ function Get-CreateInstallInfo {
     $ProductName = & $GetResolvedValue 'progname' ([string]$VersionInfo.ProductName).Trim()
     $DisplayVersion = & $GetResolvedValue 'ver' ([string]$VersionInfo.ProductVersion).Trim()
     $Publisher = & $GetResolvedValue 'compname' ([string]$VersionInfo.CompanyName).Trim()
-    $InstallLocationName = $ProjectVariables.Contains('instlocation') ? 'instlocation' : 'setuppath'
+    # addremoveex/addremoveext use instlocation as a route flag, but write the value held by
+    # instlocal. Projects without that route use the ordinary setuppath macro.
+    $InstallLocationName = $ProjectVariables.Contains('instlocation') ? 'instlocal' : 'setuppath'
     $InstallLocationResult = & $ResolveProjectVariable $InstallLocationName
     $DefaultInstallLocation = if ($null -ne $InstallLocationResult -and $InstallLocationResult.UnresolvedMacros.Count -eq 0) { ([string]$InstallLocationResult.Value).TrimEnd([char]'\') } else { $null }
     if ($null -ne $InstallLocationResult -and $InstallLocationResult.UnresolvedMacros.Count -gt 0) {
@@ -3139,6 +3187,12 @@ function Get-CreateInstallInfo {
     }
     $SilentResult = & $ResolveProjectVariable 'silentpar'
     $SilentSwitch = if ($null -ne $SilentResult -and $SilentResult.UnresolvedMacros.Count -eq 0) { ([string]$SilentResult.Value).Trim() } else { $null }
+    $SupportsSilentInstallation = if ($null -eq $SilentResult -or $SilentResult.UnresolvedMacros.Count -gt 0) { $null } else { -not [string]::IsNullOrWhiteSpace($SilentSwitch) }
+    if ($null -ne $SilentResult -and $SilentResult.UnresolvedMacros.Count -gt 0) {
+      $null = $UnresolvedFields.Add('InstallerSwitches')
+      $null = $UnresolvedFields.Add('InstallModes')
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'CreateInstall.Silent.Dynamic' -Source CreateInstall -Message "CreateInstall's silent parameter depends on unresolved runtime macro(s): $($SilentResult.UnresolvedMacros -join ', ')." -Kind Incomplete -Areas Installability -AffectedFields @('InstallerSwitches', 'InstallModes') -Evidence @{ Expression = [string]$ProjectVariables['silentpar']; Macros = $SilentResult.UnresolvedMacros }))
+    }
 
     if ($null -ne $InstallFileEvidence -and $Layout.AllVolumesAvailable -and $Layout.PasswordCount -eq 0 -and -not $CompressionMethods.Contains('Unknown')) {
       try {
@@ -3266,11 +3320,13 @@ function Get-CreateInstallInfo {
       }
       if ($null -ne $CustomRegistryEvidence) {
         foreach ($Call in @($CustomRegistryEvidence.Calls)) {
-          & $AddGenteeExpression 'Registry' $Call @('ProductCode', 'AppsAndFeaturesEntries', 'Protocols', 'FileExtensions') ([pscustomobject]@{ Root = $Call.Root; RegistryView = $Call.RegistryView; Key = $Call.Subkey }) ([string]$Call.ConditionExpression)
+          $AffectedFields = Get-CreateInstallRegistryAffectedField -Root $Call.Root -Key $Call.Subkey -UnresolvedMacros $Call.UnresolvedMacros
+          & $AddGenteeExpression 'Registry' $Call $AffectedFields ([pscustomobject]@{ Root = $Call.Root; RegistryView = $Call.RegistryView; Key = $Call.Subkey }) ([string]$Call.ConditionExpression)
         }
         foreach ($Write in @($CustomRegistryEvidence.ConditionalRegistryWrites)) {
+          $AffectedFields = Get-CreateInstallRegistryAffectedField -Root $Write.Root -Key $Write.Key -UnresolvedMacros $Write.UnresolvedKeyMacros
           foreach ($Expression in @($Write.ConditionExpression)) {
-            & $AddGenteeExpression 'RegistryValue' $Write @('ProductCode', 'AppsAndFeaturesEntries', 'Protocols', 'FileExtensions') ([pscustomobject]@{ Root = $Write.Root; RegistryView = $Write.RegistryView; Key = $Write.Key; Name = $Write.Name; Value = $Write.Value }) ([string]$Expression)
+            & $AddGenteeExpression 'RegistryValue' $Write $AffectedFields ([pscustomobject]@{ Root = $Write.Root; RegistryView = $Write.RegistryView; Key = $Write.Key; Name = $Write.Name; Value = $Write.Value }) ([string]$Expression)
           }
         }
       }
@@ -3377,6 +3433,7 @@ function Get-CreateInstallInfo {
       SupportedScopes              = $SupportedScopes
       ScopeEvidence                = if ($ProductCode) { 'Deterministic uninstall registry hive and view' } elseif ($ExecutionLevel -ieq 'requireAdministrator') { 'PE requestedExecutionLevel' } else { $null }
       RequestedExecutionLevel      = $ExecutionLevel
+      SupportsSilentInstallation   = $SupportsSilentInstallation
       InstallerSwitches            = if ($SilentSwitch) { [ordered]@{ Silent = $SilentSwitch; SilentWithProgress = $SilentSwitch } } else { [ordered]@{} }
       InstallModes                 = [string[]]@('interactive') + $(if ($SilentSwitch) { @('silent', 'silentWithProgress') } else { @() })
       RegistryWrites               = $RegistryWriteArray
@@ -3413,7 +3470,7 @@ function Get-CreateInstallInfo {
       GEA                          = if ($null -ne $Layout) { [pscustomobject]@{ ArchiveProfile = $Layout.ArchiveProfile; MajorVersion = $Layout.MajorVersion; MinorVersion = $Layout.MinorVersion; ArchiveOffset = $Layout.ArchiveOffset; HeaderSize = $Layout.HeaderSize; SummarySize = $Layout.SummarySize; MovedSize = $Layout.MovedSize; BlockSize = $Layout.BlockSize; SolidSize = $Layout.SolidSize; EntryCount = $Layout.Entries.Count; CompressionMethods = @($CompressionMethods | Sort-Object); UnsupportedCompressionMethods = @($CompressionMethods | Where-Object { $_ -eq 'Unknown' } | Sort-Object); PasswordCount = $Layout.PasswordCount; VolumeCount = $Layout.VolumeCount; VolumePattern = $Layout.VolumePattern; VolumeDirectory = $Layout.VolumeDirectory; VolumeFiles = $Layout.VolumeFiles; MissingVolumes = $Layout.MissingVolumes; AllVolumesAvailable = $Layout.AllVolumesAvailable } } else { $null }
       ExtractedFiles               = if ($null -ne $Layout) { @($Layout.Entries.FullName) } else { @() }
       CanExpand                    = $null -ne $Layout -and $Layout.AllVolumesAvailable -and $Layout.PasswordCount -eq 0 -and -not $CompressionMethods.Contains('Unknown')
-      ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.CreateInstall'; ParserMajor = 10; FormatCatalogVersion = [int]$Script:CreateInstallFormatCatalog.CatalogVersion; ArchiveProfile = if ($null -ne $Layout) { $Layout.ArchiveProfile } else { $null }; AddRemoveProfile = if ($null -ne $UninstallEvidence) { $UninstallEvidence.ProgramInfo.AddRemoveProfile } else { $null }; InstallGroupRoute = if ($null -ne $InstallFileEvidence) { $InstallFileEvidence.RouteId } else { $null }; Sources = @('PE version resource', 'PE application manifest', 'Gentee launcher/linkhead and GE 4.0 object serialization', 'Gentee generated MAINVAR/g_list data and imported-function records', 'CreateInstall addremove/addremoveex/addremoveext command source', 'CreateInstall registry, association, shortcut, process, environment, prerequisite, service, registration, scheduled-task, copy, download, archive, and INI command sources', 'CreateInstall unpackgroup/unpackgroupex command source', 'Gentee GEA v1/v2 single-volume and spanned-volume structures', 'Gentee LZGE decoder', 'Gentee-modified PPMd-I decoder') }
+      ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.CreateInstall'; ParserMajor = 12; FormatCatalogVersion = [int]$Script:CreateInstallFormatCatalog.CatalogVersion; ArchiveProfile = if ($null -ne $Layout) { $Layout.ArchiveProfile } else { $null }; AddRemoveProfile = if ($null -ne $UninstallEvidence) { $UninstallEvidence.ProgramInfo.AddRemoveProfile } else { $null }; InstallGroupRoute = if ($null -ne $InstallFileEvidence) { $InstallFileEvidence.RouteId } else { $null }; Sources = @('PE version resource', 'PE application manifest', 'Gentee launcher/linkhead and GE 4.0 object serialization', 'Gentee generated MAINVAR/g_list data and imported-function records', 'CreateInstall addremove/addremoveex/addremoveext command source', 'CreateInstall registry, association, shortcut, process, environment, prerequisite, service, registration, scheduled-task, copy, download, archive, and INI command sources', 'CreateInstall unpackgroup/unpackgroupex command source', 'Gentee GEA v1/v2 single-volume and spanned-volume structures', 'Gentee LZGE decoder', 'Gentee-modified PPMd-I decoder') }
     }
   }
 }

@@ -3,10 +3,9 @@
 # Process boundary:
 #
 #   Setup Factory path -> InstallerBridge -> SetupFactory.GetInfo/Expand
-#                        <- versioned overlay, irsetup.dat, and ARP evidence
+#                        <- companion-media/overlay, compiled metadata, and ARP evidence
 #
-# The GPL parser owns v4-v10 signatures, file records, compression, CRC, legacy
-# product/uninstall blocks, and session-variable/Lua interpretation. This Apache-2.0 bridge does not copy those details.
+# The GPL parser owns the v3.1 Crusher media route, v4-v10 signatures, file records, compression, CRC, legacy product/uninstall blocks, and session-variable/Lua interpretation. This Apache-2.0 bridge does not copy those details.
 # See Modules/InstallerParsers/Libraries/Installers/SetupFactory.psm1.
 
 # Apply default function parameters
@@ -15,7 +14,7 @@ if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDe
 function Get-SetupFactoryInfo {
   <#
   .SYNOPSIS
-    Get static metadata from a Setup Factory 4-10 installer
+    Get static metadata from Setup Factory 3.1-10 media
   .PARAMETER Path
     Path to the installer or format artifact read by this function.
   #>
@@ -31,7 +30,7 @@ function Get-SetupFactoryInfo {
 function Expand-SetupFactoryInstaller {
   <#
   .SYNOPSIS
-    Expand a Setup Factory 4-10 installer through the separate GPL parser
+    Expand Setup Factory 3.1-10 media through the separate GPL parser
   .PARAMETER Path
     Path to the installer or format artifact read by this function.
   .PARAMETER DestinationPath

@@ -356,8 +356,27 @@ function Get-MicaSetupInfo {
       $UnresolvedExpressions = @($Options.Evidence | Where-Object { -not $_.IsResolved } | ForEach-Object {
           [pscustomobject]@{ Name = $_.Name; Expression = $_.Expression; Method = $_.Method; IlOffset = $_.IlOffset }
         })
-      if ($UnresolvedExpressions.Count -gt 0) {
-        $Diagnostics.Add((New-InstallerDiagnostic -Id 'MicaSetup.Configuration.ExpressionsUnresolved' -Source 'MicaSetup' -Message "MicaSetup contains $($UnresolvedExpressions.Count) unresolved compiled configuration expression(s); affected effects require source inspection or VM validation." -Kind Incomplete -Areas Metadata -Evidence $UnresolvedExpressions))
+      $LocalizedUiExpressionNames = @('SetupName', 'MessageOfPage2', 'MessageOfPage3')
+      $LocalizedUiExpressions = @($UnresolvedExpressions | Where-Object Name -In $LocalizedUiExpressionNames)
+      $BehaviorExpressions = @($UnresolvedExpressions | Where-Object Name -NotIn $LocalizedUiExpressionNames)
+      if ($LocalizedUiExpressions.Count -gt 0) {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'MicaSetup.Configuration.LocalizedUiExpressions' -Source 'MicaSetup' -Message "MicaSetup contains $($LocalizedUiExpressions.Count) runtime-localized setup UI expression(s); their source calls are retained without treating them as unresolved package metadata." -Kind Information -Areas Metadata -Evidence $LocalizedUiExpressions))
+      }
+      if ($BehaviorExpressions.Count -gt 0) {
+        $AffectedExpressionFields = [string[]]@($BehaviorExpressions | ForEach-Object {
+            switch ($_.Name) {
+              { $_ -in 'AppName', 'DisplayName' } { 'DisplayName'; 'AppsAndFeaturesEntries' }
+              'DisplayVersion' { 'DisplayVersion'; 'AppsAndFeaturesEntries' }
+              'Publisher' { 'Publisher'; 'AppsAndFeaturesEntries' }
+              'KeyName' { 'ProductCode'; 'AppsAndFeaturesEntries' }
+              'DisplayIcon' { 'DisplayIcon'; 'AppsAndFeaturesEntries' }
+              { $_ -in 'UseElevated', 'IsUseRegistryPreferX86' } { 'Scope'; 'AppsAndFeaturesEntries' }
+              { $_ -in 'IsCreateRegistryKeys', 'IsCreateUninst', 'SystemComponent' } { 'ProductCode'; 'AppsAndFeaturesEntries' }
+              { $_ -in 'InstallPath', 'UseInstallPathPreferX86' } { 'DefaultInstallLocation' }
+              'UnpackingPassword' { 'PayloadPassword' }
+            }
+          } | Sort-Object -Unique)
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'MicaSetup.Configuration.ExpressionsUnresolved' -Source 'MicaSetup' -Message "MicaSetup contains $($BehaviorExpressions.Count) unresolved compiled configuration expression(s); affected effects require source inspection or VM validation." -Kind Incomplete -Areas Metadata -AffectedFields $AffectedExpressionFields -Evidence $BehaviorExpressions))
       }
       $Generation = $Managed.BuilderGeneration
       $ConfigurationModel = $Managed.ConfigurationModel

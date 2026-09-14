@@ -78,12 +78,22 @@ BeforeAll {
     return $Bytes
   }
 
+  function ConvertTo-TestBigEndianUInt64 {
+    param([Parameter(Mandatory)][uint64]$Value)
+    $Bytes = [BitConverter]::GetBytes($Value)
+    [Array]::Reverse($Bytes)
+    return $Bytes
+  }
+
   function New-TestCookfsInstallBuilderFixture {
     param(
       [Parameter(Mandatory)][string]$Name,
       [Parameter(Mandatory)][string]$ProjectXml,
       [ValidateSet('None', 'BZip2')][string]$Compression = 'None',
-      [switch]$UnsupportedCookfsCompression
+      [ValidateSet('md5', 'crc32')][string]$PageHashAlgorithm = 'md5',
+      [uint64]$ModificationTimeUnixSeconds = 1700000000,
+      [switch]$UnsupportedCookfsCompression,
+      [switch]$CorruptPageHash
     )
 
     # The fixture is a small unencrypted CFS0002 archive with one BitRock split
@@ -105,12 +115,21 @@ BeforeAll {
         $Index.WriteByte([byte]$NameBytes.Length)
         $Index.Write($NameBytes, 0, $NameBytes.Length)
         $Index.WriteByte(0)
-        $Index.Write([byte[]]::new(8), 0, 8)
+        $Timestamp = ConvertTo-TestBigEndianUInt64 -Value $ModificationTimeUnixSeconds
+        $Index.Write($Timestamp, 0, $Timestamp.Length)
         foreach ($Value in @([uint32]1, [uint32]$Page, [uint32]0, [uint32]$File.Content.Length)) {
           $Bytes = ConvertTo-TestBigEndianUInt32 -Value $Value
           $Index.Write($Bytes, 0, $Bytes.Length)
         }
       }
+      $MetadataKey = [Text.Encoding]::UTF8.GetBytes('cookfs.pagehash')
+      $MetadataValue = [Text.Encoding]::UTF8.GetBytes($PageHashAlgorithm)
+      $Metadata = $MetadataKey + [byte]0 + $MetadataValue
+      foreach ($Value in @([uint32]1, [uint32]$Metadata.Length)) {
+        $Bytes = ConvertTo-TestBigEndianUInt32 -Value $Value
+        $Index.Write($Bytes, 0, $Bytes.Length)
+      }
+      $Index.Write($Metadata, 0, $Metadata.Length)
       $StoredIndex = [byte[]](0) + $Index.ToArray()
     } finally {
       $Index.Dispose()
@@ -136,7 +155,24 @@ BeforeAll {
     $Cookfs = [IO.MemoryStream]::new()
     try {
       foreach ($Page in $Pages) { $Cookfs.Write($Page, 0, $Page.Length) }
-      $Cookfs.Write([byte[]]::new($Pages.Count * 16), 0, $Pages.Count * 16)
+      $PageHashes = [IO.MemoryStream]::new()
+      try {
+        foreach ($File in $Files) {
+          if ($PageHashAlgorithm -eq 'crc32') {
+            $PageHashes.Write([byte[]]::new(8), 0, 8)
+            $LengthBytes = ConvertTo-TestBigEndianUInt32 -Value ([uint32]$File.Content.Length)
+            $CrcBytes = ConvertTo-TestBigEndianUInt32 -Value ([uint32](Get-BinaryCrc32 -Bytes $File.Content))
+            $PageHashes.Write($LengthBytes, 0, $LengthBytes.Length)
+            $PageHashes.Write($CrcBytes, 0, $CrcBytes.Length)
+          } else {
+            $Hash = [Security.Cryptography.MD5]::HashData($File.Content)
+            $PageHashes.Write($Hash, 0, $Hash.Length)
+          }
+        }
+        $PageHashBytes = $PageHashes.ToArray()
+      } finally { $PageHashes.Dispose() }
+      if ($CorruptPageHash) { $PageHashBytes[0] = $PageHashBytes[0] -bxor 0xFF }
+      $Cookfs.Write($PageHashBytes, 0, $PageHashBytes.Length)
       foreach ($Page in $Pages) {
         $Bytes = ConvertTo-TestBigEndianUInt32 -Value ([uint32]$Page.Length)
         $Cookfs.Write($Bytes, 0, $Bytes.Length)
@@ -290,6 +326,90 @@ Describe 'InstallBuilder static parser' {
     $Entry.InstallDate | Should -BeNullOrEmpty
   }
 
+  It 'Should apply post-uninstaller deletion to the built-in ARP entry' {
+    $Fixture = New-TestInstallBuilderFixture -Name 'synthetic-installbuilder-built-in-arp-delete.exe' -ProjectXml @'
+<project>
+  <fullName>Deleted Built-In</fullName><version>1.0</version><vendor>Example Vendor</vendor>
+  <postUninstallerCreationActionList><registryDelete><key>HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall\Deleted Built-In 1.0</key></registryDelete></postUninstallerCreationActionList>
+</project>
+'@
+
+    $Info = Get-InstallBuilderInfo -Path $Fixture
+
+    $Info.WritesBuiltInArp | Should -BeTrue
+    $Info.WritesAppsAndFeaturesEntry | Should -BeFalse
+    $Info.ProductCode | Should -BeNullOrEmpty
+    $Info.VisibleArpEntries | Should -HaveCount 0
+    $Info.Diagnostics.Id | Should -Contain 'InstallBuilder.ARP.PostCreationDeleteApplied'
+  }
+
+  It 'Should promote one surviving custom ARP entry after deleting the built-in entry' {
+    $Fixture = New-TestInstallBuilderFixture -Name 'synthetic-installbuilder-custom-arp-replacement.exe' -ProjectXml @'
+<project>
+  <fullName>Replaced Built-In</fullName><version>1.0</version><vendor>Example Vendor</vendor>
+  <readyToInstallActionList><registrySet><key>HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall\Custom.Product</key><name>DisplayName</name><value>Custom Product</value></registrySet></readyToInstallActionList>
+  <postUninstallerCreationActionList><registryDelete><key>HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall\Replaced Built-In 1.0</key></registryDelete></postUninstallerCreationActionList>
+</project>
+'@
+
+    $Info = Get-InstallBuilderInfo -Path $Fixture
+
+    $Info.ProductCode | Should -Be 'Custom.Product'
+    $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
+    $Info.VisibleArpEntries | Should -HaveCount 1
+    $Info.AppsAndFeaturesEntries.ProductCode | Should -Be 'Custom.Product'
+    $Info.Diagnostics.Id | Should -Contain 'InstallBuilder.ARP.PostCreationDeleteApplied'
+  }
+
+  It 'Should resolve deterministic project identity expressions and omit unresolved identity values' {
+    $ResolvedFixture = New-TestInstallBuilderFixture -Name 'synthetic-installbuilder-resolved-identity.exe' -ProjectXml @'
+<project>
+  <shortName>Identity</shortName><fullName>${project.shortName} Product</fullName><version>2.4</version><vendor>Example Vendor</vendor>
+</project>
+'@
+    $UnresolvedFixture = New-TestInstallBuilderFixture -Name 'synthetic-installbuilder-unresolved-identity.exe' -ProjectXml @'
+<project>
+  <shortName>Identity</shortName><fullName>${runtime_product_name}</fullName><version>${runtime_version}</version><vendor>${runtime_vendor}</vendor>
+  <windowsARPRegistryPrefix>Static.Product</windowsARPRegistryPrefix>
+</project>
+'@
+
+    $Resolved = Get-InstallBuilderInfo -Path $ResolvedFixture
+    $Resolved.DisplayName | Should -Be 'Identity Product'
+    $Resolved.ProductCode | Should -Be 'Identity Product 2.4'
+    $Resolved.AppsAndFeaturesEntries.DisplayName | Should -Be 'Identity Product'
+
+    $Unresolved = Get-InstallBuilderInfo -Path $UnresolvedFixture
+    $Unresolved.DisplayName | Should -BeNullOrEmpty
+    $Unresolved.DisplayVersion | Should -BeNullOrEmpty
+    $Unresolved.Publisher | Should -BeNullOrEmpty
+    $Unresolved.ProductCode | Should -Be 'Static.Product'
+    $Unresolved.UnresolvedFields | Should -Contain 'DisplayName'
+    $Unresolved.UnresolvedFields | Should -Contain 'DisplayVersion'
+    $Unresolved.UnresolvedFields | Should -Contain 'Publisher'
+    $Unresolved.UnresolvedFields | Should -Contain 'AppsAndFeaturesEntries'
+    $Unresolved.Diagnostics.Id | Should -Contain 'InstallBuilder.Metadata.IdentityUnresolved'
+    $Unresolved.Diagnostics.Id | Should -Contain 'InstallBuilder.ARP.BuiltInValuesUnresolved'
+  }
+
+  It 'Should make built-in ARP evidence unresolved after a conditional post-creation delete' {
+    $Fixture = New-TestInstallBuilderFixture -Name 'synthetic-installbuilder-built-in-arp-conditional-delete.exe' -ProjectXml @'
+<project>
+  <fullName>Conditional Built-In</fullName><version>1.0</version><vendor>Example Vendor</vendor>
+  <postUninstallerCreationActionList><registryDelete><key>HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall\Conditional Built-In 1.0</key><ruleList><fileExists><path>${installdir}/marker</path></fileExists></ruleList></registryDelete></postUninstallerCreationActionList>
+</project>
+'@
+
+    $Info = Get-InstallBuilderInfo -Path $Fixture
+
+    $Info.WritesAppsAndFeaturesEntry | Should -BeNullOrEmpty
+    $Info.ProductCode | Should -BeNullOrEmpty
+    $Info.UncertainArpEntries.ProductCode | Should -Be 'Conditional Built-In 1.0'
+    $Info.UnresolvedFields | Should -Contain 'ProductCode'
+    $Info.UnresolvedFields | Should -Contain 'AppsAndFeaturesEntries'
+    $Info.Diagnostics.Id | Should -Contain 'InstallBuilder.ARP.PostCreationDeleteConditional'
+  }
+
   It 'Should honor inherited conditions on registry actions' {
     $Fixture = New-TestInstallBuilderFixture -Name 'synthetic-installbuilder-conditional-registry.exe' -ProjectXml @'
 <project>
@@ -305,9 +425,30 @@ Describe 'InstallBuilder static parser' {
 
     ($Info.RegistryWrites | Where-Object { $_.RawKey -like '*Static.Product' }).ConditionState | Should -Be 'True'
     ($Info.RegistryWrites | Where-Object { $_.RawKey -like '*Conditional.Product' }).ConditionState | Should -Be 'Unknown'
+    ($Info.ProjectActions | Where-Object ActionType -EQ 'registrySet') | Should -HaveCount 2
     $Info.ProductCode | Should -Be 'Static.Product'
     $Info.AppsAndFeaturesEntries.ProductCode | Should -Be 'Static.Product'
     $Info.Diagnostics.Id | Should -Contain 'InstallBuilder.Registry.ConditionsUnresolved'
+    $Info.UnresolvedFields | Should -Contain 'AppsAndFeaturesEntries'
+    $Info.UnresolvedFields | Should -Contain 'ProductCode'
+  }
+
+  It 'Should not mark manifest registry fields unresolved for an unrelated computed value' {
+    $Fixture = New-TestInstallBuilderFixture -Name 'synthetic-installbuilder-unrelated-registry.exe' -ProjectXml @'
+<project>
+  <fullName>Registry Product</fullName><version>1.0</version><vendor>Example Vendor</vendor>
+  <readyToInstallActionList><registrySet><key>HKEY_LOCAL_MACHINE\Software\Example\Product</key><name>ConfiguredValue</name><value>${runtime_value}</value></registrySet></readyToInstallActionList>
+</project>
+'@
+
+    $Info = Get-InstallBuilderInfo -Path $Fixture
+
+    $Info.Diagnostics.Id | Should -Contain 'InstallBuilder.Registry.ValuesUnresolved'
+    ($Info.Diagnostics | Where-Object Id -EQ 'InstallBuilder.Registry.ValuesUnresolved').AffectedFields | Should -BeNullOrEmpty
+    $Info.UnresolvedFields | Should -Not -Contain 'ProductCode'
+    $Info.UnresolvedFields | Should -Not -Contain 'AppsAndFeaturesEntries'
+    $Info.UnresolvedFields | Should -Not -Contain 'Protocols'
+    $Info.UnresolvedFields | Should -Not -Contain 'FileExtensions'
   }
 
   It 'Should exclude non-installation registry phases from ARP and association projection' {
@@ -343,6 +484,66 @@ Describe 'InstallBuilder static parser' {
     $Info.FileExtensions | Should -Not -Contain 'removed'
     ($Info.RegistryAssociationInfo.FileExtensionAssociations | Where-Object Extension -EQ '.installed').Command | Should -Be '"C:\Apps\Phase\app.exe" "%1"'
     $Info.Diagnostics.Id | Should -Contain 'InstallBuilder.Registry.NonInstallPhaseExcluded'
+  }
+
+  It 'Should apply folder-owned registry sets and later deletes in runtime order' {
+    $Fixture = New-TestInstallBuilderFixture -Name 'synthetic-installbuilder-registry-delete.exe' -ProjectXml @'
+<project>
+  <createWindowsARPEntry>0</createWindowsARPEntry><requestedExecutionLevel>asInvoker</requestedExecutionLevel>
+  <componentList><component><name>default</name><folderList><folder><name>files</name><destination>C:\Apps\Registry</destination><actionList>
+    <registrySet><key>HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\Folder.Product</key><name>DisplayName</name><value>Folder Product</value></registrySet>
+    <registrySet><key>HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\Deleted.Product</key><name>DisplayName</name><value>Deleted Product</value></registrySet>
+    <registryDelete><key>HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\Deleted.Product</key></registryDelete>
+    <registrySet><key>HKEY_CURRENT_USER\Software\Classes\.deleted</key><value>Deleted.Document</value></registrySet>
+    <registryDelete><key>HKEY_CURRENT_USER\Software\Classes\.deleted</key></registryDelete>
+  </actionList></folder></folderList></component></componentList>
+</project>
+'@
+
+    $Info = Get-InstallBuilderInfo -Path $Fixture
+
+    $Info.RegistryOperations | Should -HaveCount 5
+    $Info.RegistryWrites | Should -HaveCount 3
+    $Info.RegistryDeletes | Should -HaveCount 2
+    $Info.EffectiveRegistryWrites | Should -HaveCount 1
+    $Info.EffectiveRegistryWrites[0].Phase | Should -Be 'folderActionList'
+    $Info.EffectiveRegistryWrites[0].Lifecycle | Should -Be 'Installation'
+    $Info.ProductCode | Should -Be 'Folder.Product'
+    $Info.VisibleArpEntries.ProductCode | Should -Not -Contain 'Deleted.Product'
+    $Info.FileExtensions | Should -Not -Contain 'deleted'
+  }
+
+  It 'Should apply native file-association removal actions without losing operation evidence' {
+    $Fixture = New-TestInstallBuilderFixture -Name 'synthetic-installbuilder-association-remove.exe' -ProjectXml @'
+<project>
+  <readyToInstallActionList>
+    <associateWindowsFileExtension><extensions>.kept .removed</extensions><progID>Example.Document</progID></associateWindowsFileExtension>
+    <removeWindowsFileAssociation><extensions>.removed</extensions><progID>Example.Document</progID></removeWindowsFileAssociation>
+  </readyToInstallActionList>
+</project>
+'@
+
+    $Info = Get-InstallBuilderInfo -Path $Fixture
+
+    $Info.FileExtensions | Should -Be @('kept')
+    $Info.FileExtensionAssociations | Should -HaveCount 3
+    ($Info.FileExtensionAssociations | Where-Object Operation -EQ 'Remove').Extension | Should -Be '.removed'
+    $Info.AssociationInfo.ActionAssociations | Should -HaveCount 3
+  }
+
+  It 'Should expose declarative .NET Framework detection ranges as runtime requirements' {
+    $Fixture = New-TestInstallBuilderFixture -Name 'synthetic-installbuilder-dotnet.exe' -ProjectXml @'
+<project>
+  <preInstallationActionList><autodetectDotNetFramework><validDotNetVersionList><validDotNetVersion><minVersion>4.7.2</minVersion><maxVersion>4.8.1</maxVersion></validDotNetVersion></validDotNetVersionList></autodetectDotNetFramework></preInstallationActionList>
+</project>
+'@
+
+    $Info = Get-InstallBuilderInfo -Path $Fixture
+
+    $Info.RuntimeRequirements.DotNetFramework | Should -HaveCount 1
+    $Info.RuntimeRequirements.DotNetFramework[0].ValidVersions[0].MinimumVersion | Should -Be '4.7.2'
+    $Info.RuntimeRequirements.DotNetFramework[0].ValidVersions[0].MaximumVersion | Should -Be '4.8.1'
+    $Info.Diagnostics.Id | Should -Contain 'InstallBuilder.Requirement.DotNetFramework'
   }
 
   It 'Should evaluate the documented portable InstallBuilder rule subset' {
@@ -489,16 +690,27 @@ Describe 'InstallBuilder static parser' {
       <ruleList><fileExists><path>${runtime_state}/enabled.flag</path></fileExists></ruleList>
     </runProgram>
   </readyToInstallActionList>
+  <finalPageActionList>
+    <runProgram>
+      <program>${installdir}/app.exe</program>
+      <ruleList><fileExists><path>${runtime_state}/launch.flag</path></fileExists></ruleList>
+    </runProgram>
+  </finalPageActionList>
 </project>
 '@
 
     $Info = Get-InstallBuilderInfo -Path $Fixture
 
-    $Rule = @($Info.DynamicProjectLogic | Where-Object { $_.EvidenceKind -eq 'Rule' -and $_.OwnerType -eq 'runProgram' })
+    $Rule = @($Info.DynamicProjectLogic | Where-Object { $_.EvidenceKind -eq 'Rule' -and $_.OwnerType -eq 'runProgram' -and $_.Phase -eq 'readyToInstallActionList' })
     $Rule | Should -HaveCount 1
     $Rule[0].SourceCode | Should -Match '<fileExists>'
     $Rule[0].ReferencedVariables | Should -Contain 'runtime_state'
     ($Rule[0].VariableValues | Where-Object Name -EQ 'runtime_state').Source | Should -Be 'RuntimeOrUnknown'
+    $Rule[0].AffectedFields | Should -Contain 'ProductCode'
+
+    $PresentationRule = @($Info.DynamicProjectLogic | Where-Object { $_.EvidenceKind -eq 'Rule' -and $_.OwnerType -eq 'runProgram' -and $_.Phase -eq 'finalPageActionList' })
+    $PresentationRule | Should -HaveCount 1
+    $PresentationRule[0].AffectedFields | Should -BeNullOrEmpty
 
     $Expression = @($Info.DynamicProjectLogic | Where-Object { $_.EvidenceKind -eq 'Expression' -and $_.Property -eq 'programArguments' })
     $Expression | Should -HaveCount 1
@@ -560,6 +772,7 @@ Describe 'InstallBuilder static parser' {
       $Info.PackagedPayloadFiles | Should -Contain 'readme.txt'
       $Info.PackagedPayloadFiles | Should -Not -Contain 'app.exe___bitrockBigFile1'
       $Info.ConditionalPayloadFiles | Should -Contain 'app.exe'
+      $Info.UnresolvedFields | Should -Contain 'PayloadFiles'
       $Info.Diagnostics.Id | Should -Contain 'InstallBuilder.Payload.ConditionsUnresolved'
       $Info.CookfsInfo.CompressionTypes | Should -Be @('None')
 
@@ -604,6 +817,37 @@ Describe 'InstallBuilder static parser' {
       $Extracted = @(Expand-InstallBuilderInstaller -Path $Fixture -DestinationPath $Destination -Name 'app.exe' -CollisionAction Rename)
       $Extracted | Should -HaveCount 1
       [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($Extracted[0].FullName)) | Should -Be 'first-second'
+    } finally {
+      Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  It 'Should decode CookFS timestamps and validate MD5 and CRC32 page hashes' {
+    foreach ($HashAlgorithm in 'md5', 'crc32') {
+      $Fixture = New-TestCookfsInstallBuilderFixture -Name "synthetic-installbuilder-$HashAlgorithm-hash.exe" -ProjectXml '<project><shortName>Hash</shortName><version>1.0</version></project>' -PageHashAlgorithm $HashAlgorithm
+      $Destination = Join-Path $Script:FixtureDirectory "$HashAlgorithm-hash-expanded"
+      try {
+        $Info = Get-InstallBuilderInfo -Path $Fixture
+        $Info.CookfsInfo.PageHashAlgorithm | Should -Be $HashAlgorithm
+        $Info.CookfsInfo.IndexMetadata.Key | Should -Contain 'cookfs.pagehash'
+        $Entry = $Info.PayloadCatalog | Where-Object PhysicalPath -CEQ 'app.exe' | Select-Object -First 1
+        $Entry.ModificationTimeUnixSeconds | Should -Be 1700000000
+        $Entry.ModificationTimeUtc | Should -Be ([DateTimeOffset]::FromUnixTimeSeconds(1700000000).UtcDateTime)
+
+        $Extracted = @(Expand-InstallBuilderInstaller -Path $Fixture -DestinationPath $Destination -Name 'app.exe' -CollisionAction Rename)
+        $Extracted | Should -HaveCount 1
+        $Extracted[0].LastWriteTimeUtc | Should -Be ([DateTimeOffset]::FromUnixTimeSeconds(1700000000).UtcDateTime)
+      } finally {
+        Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue
+      }
+    }
+  }
+
+  It 'Should reject a CookFS payload whose page hash does not match its expanded bytes' {
+    $Fixture = New-TestCookfsInstallBuilderFixture -Name 'synthetic-installbuilder-corrupt-hash.exe' -ProjectXml '<project><shortName>Corrupt</shortName><version>1.0</version></project>' -CorruptPageHash
+    $Destination = Join-Path $Script:FixtureDirectory 'corrupt-hash-expanded'
+    try {
+      { Expand-InstallBuilderInstaller -Path $Fixture -DestinationPath $Destination -Name 'app.exe' -CollisionAction Rename } | Should -Throw '*failed its MD5 integrity check*'
     } finally {
       Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue
     }

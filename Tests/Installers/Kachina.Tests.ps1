@@ -104,7 +104,7 @@ BeforeAll {
     param(
       [string]$Path,
       [ValidateSet('LegacyScan', 'EarlyIndexed', 'Indexed', 'ConfigOnly')][string]$Generation,
-      [ValidateSet('prefer-admin', 'prefer-user', 'force')][string]$UacStrategy = 'prefer-admin',
+      [string]$UacStrategy = 'prefer-admin',
       $Source = 'https://example.test/App.Install.${version}.exe'
     )
 
@@ -254,6 +254,21 @@ Describe 'Kachina scope and ARP projection' {
     if ($Strategy -eq 'force') { $Info.RegistryRoutes.Scope | Should -Not -Contain 'user' } else { $Info.RegistryRoutes.Scope | Should -Contain 'user' }
   }
 
+  It 'keeps source, scope, and payload diagnostics field-specific' {
+    $Path = Join-Path $TestDrive 'field-specific-diagnostics.exe'
+    New-TestKachinaInstaller -Path $Path -Generation ConfigOnly -UacStrategy 'future-strategy' -Source @([ordered]@{ id = 'broken'; name = 'Broken source' })
+
+    $Info = Get-KachinaInfo -Path $Path
+
+    $ScopeFields = @($Info.Diagnostics | Where-Object Id -EQ 'Kachina.Scope.UnknownUacStrategy' | Select-Object -ExpandProperty AffectedFields)
+    $ScopeFields | Should -HaveCount 2
+    $ScopeFields | Should -Contain 'Scope'
+    $ScopeFields | Should -Contain 'ElevationRequirement'
+    ($Info.Diagnostics | Where-Object Id -EQ 'Kachina.Source.EntryWithoutUri').AffectedFields | Should -Be @('Source')
+    ($Info.Diagnostics | Where-Object Id -EQ 'Kachina.Source.Unresolved').AffectedFields | Should -Be @('Source')
+    ($Info.Diagnostics | Where-Object Id -EQ 'Kachina.Payload.ConfigOnly').AffectedFields | Should -Be @('DisplayVersion', 'PayloadFiles')
+  }
+
   It 'normalizes ordered source catalogs and exposes update and uninstall path behavior' {
     $Path = Join-Path $TestDrive 'source-catalog.exe'
     $Source = @(
@@ -308,6 +323,7 @@ Describe 'Kachina real indexed payload' {
     $Info.SystemEffects.CreatesUpdater | Should -BeTrue
     $Info.SystemEffects.CreatesUninstaller | Should -BeTrue
     ($Info.RegistryWrites | Where-Object Name -EQ 'EstimatedSize').Value | Should -BeGreaterThan 0
+    $Info.UnresolvedFields | Should -BeNullOrEmpty
     @($Info.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
   }
 
@@ -447,6 +463,7 @@ Describe 'Kachina historical real layouts' {
     $Info.Source | Should -Be 'dfs+packed+https://77.cocogoat.cn/v2/dfs/bgi/BetterGI.Install.exe'
     $Info.UserDataPaths | Should -Be @('${INSTALL_PATH}/User')
     $Info.ExtraUninstallPaths | Should -Be @('${INSTALL_PATH}/log')
+    $Info.UnresolvedFields | Should -BeNullOrEmpty
   }
 
   It 'reports downloadable runtime requirements in cached BetterGI 0.63 media' {
@@ -463,6 +480,7 @@ Describe 'Kachina historical real layouts' {
     $Info.IgnoredUpdatePaths | Should -Be @('${INSTALL_PATH}/User')
     $Info.MetadataDeletes | Should -Contain 'libSkiaSharp.dll'
     $Info.MetadataDeletes | Should -Contain 'LibTorchSharp.dll'
+    $Info.UnresolvedFields | Should -BeNullOrEmpty
 
     $Destination = Join-Path $TestDrive 'deduplicated'
     $Files = @(Expand-KachinaInstaller -Path $Script:BetterGiCurrent -DestinationPath $Destination -Name '*original_resin_top_icon.png' -CollisionAction Error)

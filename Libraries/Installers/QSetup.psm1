@@ -512,8 +512,8 @@ function Get-QSetupLayout {
 
     $Generation = switch ($Preamble.StructuralRoute) {
       'DirectRecords' { 'Legacy1-2' }
-      'DoublePipePreamble' { 'Legacy3-5' }
-      'VersionedPreamble' { $Terminal.StructuralRoute -eq 'Modern74' ? 'Modern12' : 'Legacy7-8' }
+      'DoublePipePreamble' { 'Legacy3-6' }
+      'VersionedPreamble' { $Terminal.StructuralRoute -eq 'Modern74' ? 'Modern12' : 'Legacy7-11' }
       default { 'Unknown' }
     }
     $StructuralRoutes = [Collections.Generic.List[string]]::new()
@@ -924,14 +924,20 @@ function Get-QSetupExecutionCondition {
     Complete 73-field modern execution-action record.
   .PARAMETER IsUnconditional
     Indicates that the action ignores the serialized condition slots.
+  .PARAMETER ArgumentStart
+    Zero-based field index of the first condition-argument slot for the selected execution-record profile.
   #>
   [OutputType([pscustomobject[]])]
-  param ([Parameter(Mandatory)][AllowEmptyString()][string[]]$Fields, [Parameter(Mandatory)][bool]$IsUnconditional)
+  param (
+    [Parameter(Mandatory)][AllowEmptyString()][string[]]$Fields,
+    [Parameter(Mandatory)][bool]$IsUnconditional,
+    [Parameter(Mandatory)][ValidateRange(0, 1024)][int]$ArgumentStart
+  )
 
   $Definitions = @(
-    @{ Slot = 1; Descriptor = 6; Length = 4; Arguments = 41 },
-    @{ Slot = 2; Descriptor = 10; Length = 5; Arguments = 45 },
-    @{ Slot = 3; Descriptor = 15; Length = 5; Arguments = 49 }
+    @{ Slot = 1; Descriptor = 6; Length = 4; Arguments = $ArgumentStart },
+    @{ Slot = 2; Descriptor = 10; Length = 5; Arguments = $ArgumentStart + 4 },
+    @{ Slot = 3; Descriptor = 15; Length = 5; Arguments = $ArgumentStart + 8 }
   )
   $Result = [Collections.Generic.List[object]]::new()
   foreach ($Definition in $Definitions) {
@@ -1012,23 +1018,28 @@ function ConvertFrom-QSetupExecutionAction {
       })
   }
 
-  $IsUnconditional = $LayoutProfile.Id -eq 'ModernSixCommand' -and $Fields[5] -eq 'UnConditional'
-  $Conditions = $LayoutProfile.Id -eq 'ModernSixCommand' ? @(Get-QSetupExecutionCondition -Fields $Fields -IsUnconditional $IsUnconditional) : @()
+  $HasStructuredConditions = [bool]$LayoutProfile.HasStructuredConditions
+  $IsUnconditional = $HasStructuredConditions -and $Fields[5] -eq 'UnConditional'
+  $Conditions = $HasStructuredConditions ? @(Get-QSetupExecutionCondition -Fields $Fields -IsUnconditional $IsUnconditional -ArgumentStart $LayoutProfile.ConditionArgumentStart) : @()
+  $ObservedTrailingFields = if ($null -ne $LayoutProfile.TrailingStart -and $null -ne $LayoutProfile.TrailingEnd) {
+    [string[]]$Fields[$LayoutProfile.TrailingStart..$LayoutProfile.TrailingEnd]
+  } else { @() }
 
   return [pscustomobject][ordered]@{
-    LayoutRoute          = $LayoutProfile.Id
-    Name                 = $Fields[2]
-    Stage                = $Fields[3]
-    Sequence             = $LayoutProfile.Id -eq 'ModernSixCommand' ? $Fields[4] : $null
-    ConditionMode        = $LayoutProfile.Id -eq 'ModernSixCommand' ? $Fields[5] : 'Legacy'
-    AppliesDuring        = $Fields[0] -eq '*' ? 'Setup' : 'Uninstall'
-    IsConditional        = $LayoutProfile.Id -eq 'ModernSixCommand' ? -not $IsUnconditional : $true
-    ConditionState       = $IsUnconditional ? 'True' : 'Unknown'
-    Conditions           = [object[]]$Conditions
-    ConditionDescriptors = [string[]]($LayoutProfile.Id -eq 'ModernSixCommand' ? $Fields[6..19] : $Fields[5..19])
-    ConditionArguments   = [string[]]($LayoutProfile.Id -eq 'ModernSixCommand' ? $Fields[41..52] : $Fields[34..45])
-    Commands             = [object[]]$Commands.ToArray()
-    RawValue             = $Content
+    LayoutRoute            = $LayoutProfile.Id
+    Name                   = $Fields[2]
+    Stage                  = $Fields[3]
+    Sequence               = $HasStructuredConditions ? $Fields[4] : $null
+    ConditionMode          = $HasStructuredConditions ? $Fields[5] : 'Legacy'
+    AppliesDuring          = $Fields[0] -eq '*' ? 'Setup' : 'Uninstall'
+    IsConditional          = $HasStructuredConditions ? -not $IsUnconditional : $true
+    ConditionState         = $IsUnconditional ? 'True' : 'Unknown'
+    Conditions             = [object[]]$Conditions
+    ConditionDescriptors   = [string[]]($HasStructuredConditions ? $Fields[6..19] : $Fields[5..19])
+    ConditionArguments     = [string[]]($HasStructuredConditions ? $Fields[$LayoutProfile.ConditionArgumentStart..($LayoutProfile.ConditionArgumentStart + 11)] : $Fields[34..45])
+    Commands               = [object[]]$Commands.ToArray()
+    ObservedTrailingFields = $ObservedTrailingFields
+    RawValue               = $Content
   }
 }
 
@@ -2346,7 +2357,7 @@ function Get-QSetupInfo {
       DirectiveRecords               = [object[]]$DirectiveRecord
       DotNetFrameworkRequirements    = [string[]]$DotNetRequirements
       MsiCodes                       = [string[]]$MsiCodes
-      ParserVersionInfo              = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.QSetup'; ParserMajor = 6; FormatCatalogVersion = $Script:QSetupFormatCatalog.CatalogVersion; Sources = @('validated QSetup generation-specific preamble, zlib record, footer, split descriptor, and certificate routes', 'Setup.txt directives and versioned Execution Engine records', 'official QSetup manual defaults, conditions, commands, and operation field order', 'compiled QSetup 1.0 through 8.1 shortcut and uninstaller records', 'controlled QSetup 12 split, non-SFX, spanned-media, uninstaller, ARP, and process-result observations') }
+      ParserVersionInfo              = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.QSetup'; ParserMajor = 7; FormatCatalogVersion = $Script:QSetupFormatCatalog.CatalogVersion; Sources = @('validated QSetup generation-specific preamble, zlib record, footer, split descriptor, and certificate routes', 'Setup.txt directives and versioned Execution Engine records', 'official QSetup manual defaults, conditions, commands, and operation field order', 'compiled QSetup 1.0 through 11.0 shortcut and uninstaller records', 'controlled QSetup 12 split, non-SFX, spanned-media, uninstaller, ARP, and process-result observations') }
     }
   }
 }

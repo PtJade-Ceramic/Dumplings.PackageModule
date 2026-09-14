@@ -3,7 +3,7 @@
 # Release labels are evidence for reporting; parser dispatch uses the byte-level
 # predicates documented by each route instead of trusting PE version resources.
 @{
-  CatalogVersion    = 3
+  CatalogVersion    = 4
 
   PreambleRoutes    = @(
     @{
@@ -13,7 +13,7 @@
     }
     @{
       Id               = 'DoublePipePreamble'
-      ObservedReleases = '3.0-5.0'
+      ObservedReleases = '3.0-6.0'
       Description      = 'The overlay contains Version:u32, literal ||, PreambleLength:u32, and UTF-8 preamble text.'
     }
     @{
@@ -60,7 +60,7 @@
     }
     @{
       Id               = 'Legacy74'
-      ObservedReleases = '3.0-8.1'
+      ObservedReleases = '3.0-11.0'
       Length           = 74
       Description      = 'Version:u32, OverlayOffset:u32, RecordCount:u32, Magic:u32, legacy fields, FooterLength:u32.'
     }
@@ -74,22 +74,43 @@
 
   ExecutionRoutes   = @(
     @{
-      Id               = 'LegacyFourCommand'
-      ObservedReleases = '1.0-5.0'
-      FieldCounts      = @(59, 60)
-      CommandStart     = 20
-      CommandCount     = 4
-      ArgumentStart    = 46
-      MiddleSentinel   = 32
+      Id                      = 'LegacyFourCommand'
+      ObservedReleases        = '1.0-5.0'
+      FieldCounts             = @(59, 60)
+      CommandStart            = 20
+      CommandCount            = 4
+      ArgumentStart           = 46
+      MiddleSentinel          = 32
+      HasStructuredConditions = $false
+      ConditionArgumentStart  = $null
+      TrailingStart           = $null
+      TrailingEnd             = $null
     }
     @{
-      Id               = 'ModernSixCommand'
-      ObservedReleases = '7.0-12.0'
-      FieldCounts      = @(73)
-      CommandStart     = 20
-      CommandCount     = 6
-      ArgumentStart    = 53
-      MiddleSentinel   = 39
+      Id                      = 'TransitionalFourCommand'
+      ObservedReleases        = '6.0'
+      FieldCounts             = @(67)
+      CommandStart            = 20
+      CommandCount            = 4
+      ArgumentStart           = 47
+      MiddleSentinel          = 33
+      HasStructuredConditions = $true
+      ConditionArgumentStart  = 35
+      TrailingStart           = 59
+      TrailingEnd             = 65
+    }
+    @{
+      Id                      = 'ModernSixCommand'
+      ObservedReleases        = '7.0-12.0'
+      FieldCounts             = @(73)
+      CommandStart            = 20
+      CommandCount            = 6
+      ArgumentStart           = 53
+      MiddleSentinel          = 39
+      HasStructuredConditions = $true
+      ConditionArgumentStart  = 41
+      TrailingStart           = $null
+      TrailingEnd             = $null
     }
   )
 

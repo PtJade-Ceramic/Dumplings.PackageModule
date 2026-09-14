@@ -166,7 +166,53 @@ Describe 'MicaSetup static installer evidence' {
     $Info.EnablesUninstallDelayUntilReboot | Should -BeTrue
     $Info.OptionValues.PSObject.Properties.Name | Should -Not -Contain 'UnpackingPassword'
     $Info.PSObject.Properties.Name | Should -Contain 'UnresolvedExpressions'
+    $Info.Diagnostics.Id | Should -Contain 'MicaSetup.Configuration.LocalizedUiExpressions'
+    $Info.Diagnostics.Id | Should -Not -Contain 'MicaSetup.Configuration.ExpressionsUnresolved'
+    ($Info.UnresolvedExpressions | Where-Object Name -EQ 'SetupName').Expression | Should -Match 'System\.String\.Concat\(.+MicaSetup\.Core\.LocaleExtension\.Tr\("Setup"\)'
+    ($Info.UnresolvedExpressions | Where-Object Name -EQ 'MessageOfPage2').Expression | Should -Be 'MicaSetup.Core.LocaleExtension.Tr("Installing")'
     ($Info | ConvertTo-Json -Depth 20) | Should -Not -Match 'constant string \(redacted\).*[^\r\n]*:'
+  }
+
+  It 'does not fabricate a resolved String.Format result from unresolved arguments' {
+    $AssemblyPath = Join-Path $TestDrive 'MicaSetupUnresolvedFormat.dll'
+    $Source = @'
+using System;
+namespace MicaSetup
+{
+    public sealed class Option
+    {
+        public string AppName { get; set; }
+        public string DisplayName { get; set; }
+        public string DisplayVersion { get; set; }
+        public string Publisher { get; set; }
+    }
+
+    public static class Program
+    {
+        private static string RuntimeName() => Environment.MachineName;
+        public static void UseOptions(Action<Option> configure) { }
+        public static void Configure()
+        {
+            UseOptions(option =>
+            {
+                option.AppName = "FormatApp";
+                option.DisplayName = string.Format("Application {0}", RuntimeName());
+                option.DisplayVersion = "1.0.0";
+                option.Publisher = "Fixture Publisher";
+            });
+        }
+    }
+}
+'@
+    Add-Type -TypeDefinition $Source -OutputAssembly $AssemblyPath
+
+    $null = Test-MicaSetupInstaller -Path $Script:MicaSetupV2ArrayOptions
+    $Managed = [Dumplings.MicaSetup.MicaSetupReader]::Analyze($AssemblyPath)
+    $Evidence = $Managed.Options | Where-Object Name -EQ 'DisplayName' | Select-Object -First 1
+
+    $Evidence.IsResolved | Should -BeFalse
+    $Evidence.Value | Should -BeNullOrEmpty
+    $Evidence.Expression | Should -Match '^System\.String\.Format\("Application \{0\}", .+RuntimeName\(\)\)$'
   }
 
   It 'resolves compiler-emitted empty array options in the v2.5.6 release' {

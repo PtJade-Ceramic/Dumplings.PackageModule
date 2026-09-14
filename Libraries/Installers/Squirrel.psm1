@@ -408,7 +408,11 @@ function Read-SquirrelNuspecFromZipArchive {
     Title               = & $ReadValue 'title'
     Version             = & $ReadValue 'version'
     Authors             = & $ReadValue 'authors'
+    Owners              = & $ReadValue 'owners'
     Description         = & $ReadValue 'description'
+    Summary             = & $ReadValue 'summary'
+    ProjectUrl          = & $ReadValue 'projectUrl'
+    IconUrl             = & $ReadValue 'iconUrl'
     MachineArchitecture = & $ReadValue 'machineArchitecture'
     RuntimeDependencies = & $ReadValue 'runtimeDependencies'
     MainExecutable      = & $ReadValue 'mainExe'
@@ -694,8 +698,41 @@ function ConvertTo-SquirrelInfo {
     [Parameter(HelpMessage = 'Static PE evidence from the source-declared Velopack main executable')][psobject]$PayloadEvidence
   )
 
-  $DisplayName = if ([string]::IsNullOrWhiteSpace($Nuspec.Title)) { $Nuspec.Id } else { $Nuspec.Title }
   $HasConfirmedLauncher = $Family -in @('Squirrel', 'Velopack')
+  $NuspecDescription = $Nuspec.PSObject.Properties['Description'] ? [string]$Nuspec.Description : $null
+  $NuspecSummary = $Nuspec.PSObject.Properties['Summary'] ? [string]$Nuspec.Summary : $null
+  $NuspecOwners = $Nuspec.PSObject.Properties['Owners'] ? [string]$Nuspec.Owners : $null
+  $NuspecProjectUrl = $Nuspec.PSObject.Properties['ProjectUrl'] ? [string]$Nuspec.ProjectUrl : $null
+  $NuspecIconUrl = $Nuspec.PSObject.Properties['IconUrl'] ? [string]$Nuspec.IconUrl : $null
+
+  # Squirrel.Windows and the Clowd generations use NuGet's package projection,
+  # while Rust Velopack parses the nuspec into its own manifest. Keep these
+  # fallback rules separate because they determine the actual ARP DisplayName.
+  $DisplayName = if ($LauncherGeneration -eq 'Squirrel.Windows') {
+    @([string]$Nuspec.Title, $NuspecDescription, $NuspecSummary | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1)[0]
+  } else {
+    [string]::IsNullOrWhiteSpace([string]$Nuspec.Title) ? [string]$Nuspec.Id : [string]$Nuspec.Title
+  }
+  $Publisher = if (-not [string]::IsNullOrWhiteSpace([string]$Nuspec.Authors)) {
+    [string]$Nuspec.Authors
+  } elseif ($LauncherGeneration -like 'Clowd.Squirrel.*' -and -not [string]::IsNullOrWhiteSpace($NuspecOwners)) {
+    $NuspecOwners
+  } elseif ($LauncherGeneration -like 'Clowd.Squirrel.*') {
+    $DisplayName
+  } else {
+    $null
+  }
+
+  # Rust Velopack deliberately writes only the three numeric SemVer components
+  # to DisplayVersion. Preserve the complete nuspec version separately for
+  # update/version evidence.
+  $PackageVersion = [string]$Nuspec.Version
+  $DisplayVersion = if ($LauncherGeneration -eq 'Velopack') {
+    $VersionMatch = [regex]::Match($PackageVersion, '^(?<core>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))')
+    $VersionMatch.Success ? $VersionMatch.Groups['core'].Value : $PackageVersion
+  } else {
+    $PackageVersion
+  }
   $DefaultInstallLocation = if ($HasConfirmedLauncher -and $Nuspec.Id -cmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$') {
     '%LocalAppData%\' + $Nuspec.Id
   } else {
@@ -763,6 +800,51 @@ function ConvertTo-SquirrelInfo {
   $UnresolvedFields = [string[]]@($Unresolved | Select-Object -Unique)
   $RuntimeDependenciesRaw = ([string]$Nuspec.RuntimeDependencies).Trim()
   $ShortcutLocationsRaw = ([string]$Nuspec.ShortcutLocations).Trim()
+  $UpdatePath = $HasConfirmedLauncher ? "$DefaultInstallLocation\Update.exe" : $null
+  $UninstallString = $HasConfirmedLauncher ? "`"$UpdatePath`" --uninstall" : $null
+  $QuietUninstallString = if (-not $HasConfirmedLauncher) {
+    $null
+  } elseif ($LauncherGeneration -eq 'Velopack') {
+    "$UninstallString --silent"
+  } else {
+    "$UninstallString -s"
+  }
+  $DisplayIcon = if ($HasConfirmedLauncher -and $LauncherGeneration -eq 'Velopack' -and -not [string]::IsNullOrWhiteSpace([string]$Nuspec.MainExecutable)) {
+    "$DefaultInstallLocation\current\$([string]$Nuspec.MainExecutable -replace '/', '\')"
+  } else {
+    $null
+  }
+  $ArpUrlUpdateInfo = if ($HasConfirmedLauncher -and $LauncherGeneration -ne 'Velopack') { $NuspecProjectUrl } else { $null }
+  $AppsAndFeaturesEntries = if ($HasConfirmedLauncher) {
+    $Entry = [ordered]@{ ProductCode = [string]$Nuspec.Id }
+    if (-not [string]::IsNullOrWhiteSpace($DisplayName)) { $Entry.DisplayName = $DisplayName }
+    if (-not [string]::IsNullOrWhiteSpace($DisplayVersion)) { $Entry.DisplayVersion = $DisplayVersion }
+    if (-not [string]::IsNullOrWhiteSpace($Publisher)) { $Entry.Publisher = $Publisher }
+    @([pscustomobject]$Entry)
+  } else {
+    @()
+  }
+  $ArpEntries = if ($HasConfirmedLauncher) {
+    @([pscustomobject][ordered]@{
+        Root                 = 'HKCU'
+        Key                  = "Software\Microsoft\Windows\CurrentVersion\Uninstall\$($Nuspec.Id)"
+        RegistryView         = 'Default'
+        ProductCode          = [string]$Nuspec.Id
+        DisplayName          = $DisplayName
+        DisplayVersion       = $DisplayVersion
+        Publisher            = $Publisher
+        InstallLocation      = $DefaultInstallLocation
+        DisplayIcon          = $DisplayIcon
+        UninstallString      = $UninstallString
+        QuietUninstallString = $QuietUninstallString
+        URLUpdateInfo        = $ArpUrlUpdateInfo
+        NoModify             = 1
+        NoRepair             = 1
+        Language             = 0x0409
+      })
+  } else {
+    @()
+  }
 
   [pscustomobject][ordered]@{
     Path                         = [IO.Path]::GetFullPath($Path)
@@ -770,17 +852,19 @@ function ConvertTo-SquirrelInfo {
     ProductCode                  = $HasConfirmedLauncher ? $Nuspec.Id : $null
     UpgradeCode                  = $null
     DisplayName                  = $DisplayName
-    DisplayVersion               = $Nuspec.Version
-    Publisher                    = $Nuspec.Authors
+    DisplayVersion               = $DisplayVersion
+    Publisher                    = $Publisher
     Scope                        = $HasConfirmedLauncher ? 'user' : $null
     DefaultInstallLocation       = $DefaultInstallLocation
     WritesAppsAndFeaturesEntry   = $HasConfirmedLauncher ? $true : $null
     AppsAndFeaturesProductCode   = $HasConfirmedLauncher ? $Nuspec.Id : $null
     AppsAndFeaturesInstallerType = $HasConfirmedLauncher ? 'exe' : $null
+    AppsAndFeaturesEntries       = $AppsAndFeaturesEntries
     Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic @($Diagnostics))
     UnresolvedFields             = $UnresolvedFields
     Family                       = $Family
     PackageId                    = $Nuspec.Id
+    PackageVersion               = $PackageVersion
     Confidence                   = $Confidence
     DetectionRoute               = $DetectionRoute
     DetectionEvidence            = @($DetectionEvidence)
@@ -797,6 +881,17 @@ function ConvertTo-SquirrelInfo {
     MinimumOSVersion             = $MinimumOSVersion
     PackageRid                   = $RawRid
     MainExecutable               = $Nuspec.MainExecutable
+    RegistryHive                 = $HasConfirmedLauncher ? 'HKCU' : $null
+    RegistryView                 = $HasConfirmedLauncher ? 'Default' : $null
+    RegistryPath                 = $HasConfirmedLauncher ? "Software\Microsoft\Windows\CurrentVersion\Uninstall\$($Nuspec.Id)" : $null
+    ArpEntries                   = $ArpEntries
+    UninstallString              = $UninstallString
+    QuietUninstallString         = $QuietUninstallString
+    DisplayIcon                  = $DisplayIcon
+    URLUpdateInfo                = $NuspecProjectUrl
+    ProjectUrl                   = $NuspecProjectUrl
+    IconUrl                      = $NuspecIconUrl
+    ArpDynamicFields             = [string[]]@(if ($HasConfirmedLauncher) { 'InstallDate'; 'EstimatedSize'; if (-not $DisplayIcon) { 'DisplayIcon' } })
     RuntimeDependencies          = [string[]]@(ConvertFrom-SquirrelMetadataList -Value $RuntimeDependenciesRaw)
     RuntimeDependenciesRaw       = $RuntimeDependenciesRaw
     Channel                      = $Nuspec.Channel
@@ -1109,7 +1204,8 @@ function Get-SquirrelInfo {
         $MetadataSignatures = @($AuthoritativeResults | ForEach-Object {
             [ordered]@{
               Id = $_.Nuspec.Id; Title = $_.Nuspec.Title; Version = $_.Nuspec.Version; Authors = $_.Nuspec.Authors
-              Description = $_.Nuspec.Description; MachineArchitecture = $_.Nuspec.MachineArchitecture; RuntimeDependencies = $_.Nuspec.RuntimeDependencies
+              Owners = $_.Nuspec.Owners; Description = $_.Nuspec.Description; Summary = $_.Nuspec.Summary; ProjectUrl = $_.Nuspec.ProjectUrl; IconUrl = $_.Nuspec.IconUrl
+              MachineArchitecture = $_.Nuspec.MachineArchitecture; RuntimeDependencies = $_.Nuspec.RuntimeDependencies
               MainExecutable = $_.Nuspec.MainExecutable; OperatingSystem = $_.Nuspec.OperatingSystem; Rid = $_.Nuspec.Rid
               MinimumOSVersion = $_.Nuspec.MinimumOSVersion; Channel = $_.Nuspec.Channel; ShortcutLocations = $_.Nuspec.ShortcutLocations
               ShortcutAumid = $_.Nuspec.ShortcutAumid; ReleaseNotes = $_.Nuspec.ReleaseNotes; ReleaseNotesHtml = $_.Nuspec.ReleaseNotesHtml

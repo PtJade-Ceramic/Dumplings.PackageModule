@@ -3,7 +3,7 @@
 # official builder installers. Parser dispatch uses validated archive and compiled-routine
 # structures; the observed release ranges are regression evidence rather than routing keys.
 @{
-  CatalogVersion              = 4
+  CatalogVersion              = 5
 
   ProgramProfiles             = @(
     @{
@@ -147,11 +147,20 @@
       Description      = 'globsets receives a g_list offset whose rows contain variable name, value, machine/user mask, condition, and comment.'
     }
     @{
-      Id                       = 'EnvironmentAppend4'
-      RuntimeParameterCount    = 4
-      SourceFieldCount         = 4
-      RequiredLiteralFragments = @('Environment', 'g_append')
-      Description              = 'globappend and globdel receive the same four fields and retain the same registry/macro literals; without a compiled fingerprint this route is intentionally reported as append-or-remove.'
+      Id                    = 'EnvironmentAppend4'
+      ObservedSourceRange   = 'CreateInstall 8.11.2'
+      RuntimeParameterCount = 4
+      SourceFieldCount      = 4
+      ExactStringLiterals   = @('g_append', 'g_append', ';', 'Environment')
+      Description           = 'globappend receives variable, value, machine/user mask, and condition. Its compiled literal sequence reflects the machine read, split, append, and registry-write route.'
+    }
+    @{
+      Id                    = 'EnvironmentDelete4'
+      ObservedSourceRange   = 'CreateInstall 8.11.2'
+      RuntimeParameterCount = 4
+      SourceFieldCount      = 4
+      ExactStringLiterals   = @('g_append', 'Environment', '', 'g_append', 'g_append', ';', 'Environment')
+      Description           = 'globdel receives the same four source fields. The additional literals reflect its HKCU registry read before reverse-order list deletion.'
     }
     @{
       Id               = 'VisualCppCheck6'

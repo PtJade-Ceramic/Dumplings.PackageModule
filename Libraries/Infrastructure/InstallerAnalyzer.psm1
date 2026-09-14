@@ -677,6 +677,13 @@ function Get-InstallerStructuralExeFamilyCandidate {
     [pscustomobject]@{ Family = 'MicaSetup'; Confidence = 'high'; MatchedMarkers = @('CLR MicaSetup configuration host + WPF resources/setups/publish.7z') }
   }
 
+  # CreateInstall projects may deliberately contain no GEA payload and may omit all product-name
+  # markers. The compiled GE4 program and referenced MAINVAR table are the authoritative structure,
+  # so run the bounded Boolean probe rather than relying on the heuristic text scan.
+  if ((Test-CreateInstall -Path $File.FullName) -and $Seen.Add('CreateInstall')) {
+    [pscustomobject]@{ Family = 'CreateInstall'; Confidence = 'high'; MatchedMarkers = @('.gentee GE4 program + referenced MAINVAR table') }
+  }
+
   $NsisSignature = [byte[]](0xEF, 0xBE, 0xAD, 0xDE) + [Text.Encoding]::ASCII.GetBytes('NullsoftInst')
   $SignatureScanLength = [Math]::Min($File.Length, 67108864L)
   if ((Find-BinaryPattern -Path $File.FullName -Pattern $NsisSignature -Length $SignatureScanLength -Maximum 1).Count -gt 0 -and $Seen.Add('NSIS/Nullsoft')) {
@@ -1959,15 +1966,16 @@ function Invoke-InstallerExeParser {
     $KnownResult = Invoke-InstallerDetector -Name 'Squirrel/Velopack' -ScriptBlock {
       $Info = Get-SquirrelInfo -Path $AnalyzerInstallerPath
       [pscustomobject]@{
-        Family         = $Info.Family
-        Confidence     = $Info.Confidence
-        InstallerType  = 'exe'
-        Metadata       = $Info
-        ProductVersion = $Info.DisplayVersion
-        ProductName    = $Info.DisplayName
-        Publisher      = $Info.Publisher
-        ProductCode    = $Info.ProductCode
-        Scope          = $Info.Scope
+        Family                 = $Info.Family
+        Confidence             = $Info.Confidence
+        InstallerType          = 'exe'
+        Metadata               = $Info
+        ProductVersion         = $Info.PSObject.Properties['PackageVersion'] ? $Info.PackageVersion : $Info.DisplayVersion
+        ProductName            = $Info.DisplayName
+        Publisher              = $Info.Publisher
+        ProductCode            = $Info.ProductCode
+        Scope                  = $Info.Scope
+        AppsAndFeaturesEntries = @($Info.AppsAndFeaturesEntries)
       }
     }
     $KnownResult
@@ -2087,7 +2095,7 @@ function Invoke-InstallerAnalysisCore {
             # These structures identify the outer container by format. The raw
             # NSIS signature and InstallBuilder project marker remain routes until
             # their parsers validate surrounding offsets and records.
-            $OuterContainer = $_.Family -cin @('Burn', 'Inno Setup', 'Astrum InstallWizard', 'Kachina', 'MicaSetup', 'Zero Install', 'Qt Installer Framework', 'Advanced Installer')
+            $OuterContainer = $_.Family -cin @('Burn', 'Inno Setup', 'Astrum InstallWizard', 'Kachina', 'MicaSetup', 'CreateInstall', 'Zero Install', 'Qt Installer Framework', 'Advanced Installer')
             ConvertTo-InstallerFamilyEvidence -Candidate $_ -EvidenceKind Structural -IsOuterContainer:$OuterContainer
           })
         $HeuristicCandidates = @(Get-InstallerGenericExeFamilyCandidate -File $Installer -Budget $ScanBytes -Text $ScanText | ForEach-Object {

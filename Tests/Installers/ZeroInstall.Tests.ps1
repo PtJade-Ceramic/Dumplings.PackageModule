@@ -378,6 +378,7 @@ Describe 'Zero Install offline implementation materialization' {
     (Get-Item -LiteralPath (Join-Path $Implementation 'file.dat')).LastWriteTimeUtc = [DateTimeOffset]::FromUnixTimeSeconds(0).UtcDateTime
 
     $Vectors = @(
+      @{ Algorithm = 'Sha1'; Manifest = "X a17c9aaa61e80a1bf71d0d850af4e5baa9800bbd 0 4 file.dat`n"; Digest = 'sha1=75ea1145050a0acea9782e3078f8984f46e1f42c' }
       @{ Algorithm = 'Sha1New'; Manifest = "X a17c9aaa61e80a1bf71d0d850af4e5baa9800bbd 0 4 file.dat`n"; Digest = 'sha1new=75ea1145050a0acea9782e3078f8984f46e1f42c' }
       @{ Algorithm = 'Sha256'; Manifest = "X 3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7 0 4 file.dat`n"; Digest = 'sha256=1296c9dfbeb1f0a7eb7c104f8a556e194e10ad45a75d2c8710def3828c5f08a5' }
       @{ Algorithm = 'Sha256New'; Manifest = "X 3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7 0 4 file.dat`n"; Digest = 'sha256new_CKLMTX56WHYKP234CBHYUVLODFHBBLKFU5OSZBYQ33ZYFDC7BCSQ' }
@@ -388,6 +389,46 @@ Describe 'Zero Install offline implementation materialization' {
       $Result.Digest | Should -Be $Vector.Digest
       Test-ZeroInstallImplementationDigest -Path $Implementation -Digest $Vector.Digest -ExecutablePath 'file.dat' | Should -BeTrue
     }
+  }
+
+  It 'matches the legacy sha1 directory record and traversal layout' {
+    $Implementation = Join-Path $TestDrive 'LegacyDigestVector'
+    $Subdirectory = Join-Path $Implementation 'a'
+    $null = New-Item -Path $Subdirectory -ItemType Directory -Force
+    [IO.File]::WriteAllText((Join-Path $Implementation 'root.dat'), 'root', [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $Subdirectory 'child.dat'), 'child', [Text.UTF8Encoding]::new($false))
+    foreach ($Path in (Join-Path $Implementation 'root.dat'), (Join-Path $Subdirectory 'child.dat')) {
+      (Get-Item -LiteralPath $Path).LastWriteTimeUtc = [DateTimeOffset]::FromUnixTimeSeconds(0).UtcDateTime
+    }
+    (Get-Item -LiteralPath $Subdirectory).LastWriteTimeUtc = [DateTimeOffset]::FromUnixTimeSeconds(10).UtcDateTime
+
+    $ExpectedManifest = "D 10 /a`nF 0e93069c40111cd62dac2cd02cd71daffdb01cc0 0 5 child.dat`nF dc76e9f0c0006e8f919e0c515c66dbba3982f785 0 4 root.dat`n"
+    $Result = Get-ZeroInstallImplementationManifest -Path $Implementation -Algorithm Sha1
+
+    $Result.ManifestText | Should -Be $ExpectedManifest
+    $Result.Digest | Should -Be 'sha1=e14aa9a798500380f6bb049e75ca6813a7ea5432'
+    Test-ZeroInstallImplementationDigest -Path $Implementation -Digest $Result.Digest | Should -BeTrue
+  }
+
+  It 'verifies the official historical sha1 archive vector with directory timestamps' {
+    $ArchivePath = Resolve-DumplingsTestFixturePath 'Installers\ZeroInstall\OfficialSource\v0.29\HelloWorld.tgz'
+    if (-not (Test-DumplingsTestFixtureCacheEntry -Path $ArchivePath -Sha256 '606B8201B919CA7127065602EB9C1D8EF052063CF40CF06341D7959A506F6556')) { Set-ItResult -Skipped -Because 'Cache the Zero Install v0.29 HelloWorld.tgz test vector.'; return }
+    $Destination = Join-Path $TestDrive 'LegacyOfficialVector'
+    $ArchiveSize = (Get-Item -LiteralPath $ArchivePath).Length
+    $Feed = ConvertFrom-ZeroInstallFeed -BaseUri 'https://example.test/hello.xml' -Content @"
+<interface xmlns="http://zero-install.sourceforge.net/2004/injector/interface" uri="https://example.test/hello.xml">
+  <name>Hello</name>
+  <implementation id="sha1=3ce644dc725f1d21cfcf02562c76f375944b266a" version="1">
+    <archive href="HelloWorld.tgz" size="$ArchiveSize" type="application/x-compressed-tar" />
+  </implementation>
+</interface>
+"@
+
+    $Result = Expand-ZeroInstallImplementation -FeedInfo $Feed -ImplementationId 'sha1=3ce644dc725f1d21cfcf02562c76f375944b266a' -RetrievalSource @{'https://example.test/HelloWorld.tgz' = $ArchivePath } -DestinationPath $Destination -CollisionAction Error
+
+    $Result.ManifestVerified | Should -BeTrue
+    $Result.CalculatedDigest | Should -Be 'sha1=3ce644dc725f1d21cfcf02562c76f375944b266a'
+    $Result.ExecutablePaths | Should -Be @('HelloWorld/main')
   }
 
   It 'applies archive, file, rename, remove, and copy-from steps in order before verifying the digest' {

@@ -635,6 +635,41 @@ Describe 'Squirrel parser' {
     }
   }
 
+  It 'Should project generation-specific ARP metadata from package fields' {
+    $Fixture = New-SquirrelNuspecZipFixture -Name 'ArpProjection'
+    InModuleScope Squirrel -Parameters @{ Fixture = $Fixture } {
+      param($Fixture)
+
+      $Nuspec = [pscustomobject]@{
+        Id = 'ArpProjection'; Title = ''; Version = '1.2.3-beta.4+build.7'; Authors = 'Example Publisher'; Owners = 'Example Owner'
+        Description = 'Fallback display name'; Summary = 'Fallback summary'; ProjectUrl = 'https://example.test/app'; IconUrl = 'https://example.test/app.ico'
+        MachineArchitecture = ''; RuntimeDependencies = ''; MainExecutable = 'ArpProjection.exe'; OperatingSystem = 'windows'; Rid = ''
+        MinimumOSVersion = ''; Channel = ''; ShortcutLocations = ''; ShortcutAumid = ''; ReleaseNotes = ''; ReleaseNotesHtml = ''; SplashProgressColor = ''
+      }
+
+      $Squirrel = ConvertTo-SquirrelInfo -Path $Fixture -Family Squirrel -DetectionRoute SquirrelPeResource -Confidence high -ZipOffset 0 -Nuspec $Nuspec -LauncherGeneration 'Squirrel.Windows' -LauncherCapabilities ([pscustomobject]@{ Silent = $true; InstallLocation = $false; Log = $false })
+      $Squirrel.DisplayName | Should -Be 'Fallback display name'
+      $Squirrel.PackageVersion | Should -Be '1.2.3-beta.4+build.7'
+      $Squirrel.DisplayVersion | Should -Be '1.2.3-beta.4+build.7'
+      $Squirrel.UninstallString | Should -Be '"%LocalAppData%\ArpProjection\Update.exe" --uninstall'
+      $Squirrel.QuietUninstallString | Should -Be '"%LocalAppData%\ArpProjection\Update.exe" --uninstall -s'
+      $Squirrel.DisplayIcon | Should -BeNullOrEmpty
+      $Squirrel.AppsAndFeaturesEntries[0].DisplayName | Should -Be 'Fallback display name'
+      $Squirrel.AppsAndFeaturesEntries[0].DisplayVersion | Should -Be '1.2.3-beta.4+build.7'
+      $Squirrel.ArpEntries[0].URLUpdateInfo | Should -Be 'https://example.test/app'
+
+      $Velopack = ConvertTo-SquirrelInfo -Path $Fixture -Family Velopack -DetectionRoute VelopackBundle -Confidence high -ZipOffset 0 -Nuspec $Nuspec -LauncherGeneration Velopack -LauncherCapabilities ([pscustomobject]@{ Silent = $true; InstallLocation = $true; Log = $true })
+      $Velopack.DisplayName | Should -Be 'ArpProjection'
+      $Velopack.PackageVersion | Should -Be '1.2.3-beta.4+build.7'
+      $Velopack.DisplayVersion | Should -Be '1.2.3'
+      $Velopack.QuietUninstallString | Should -Be '"%LocalAppData%\ArpProjection\Update.exe" --uninstall --silent'
+      $Velopack.DisplayIcon | Should -Be '%LocalAppData%\ArpProjection\current\ArpProjection.exe'
+      $Velopack.AppsAndFeaturesEntries[0].DisplayVersion | Should -Be '1.2.3'
+      $Velopack.URLUpdateInfo | Should -Be 'https://example.test/app'
+      $Velopack.ArpEntries[0].URLUpdateInfo | Should -BeNullOrEmpty
+    }
+  }
+
   It 'Should read nested nupkg metadata from the Sourcetree installer' {
     $Fixture = Get-InstallerFixture -Name 'SourceTreeSetup-3.4.31.exe' -Url 'https://product-downloads.atlassian.com/software/sourcetree/windows/ga/SourceTreeSetup-3.4.31.exe'
     $Info = Get-SquirrelInfo -Path $Fixture
@@ -652,6 +687,9 @@ Describe 'Squirrel parser' {
     $Info.DisplayVersion | Should -Be '3.4.31'
     $Info.Publisher | Should -Be 'Atlassian'
     $Info.Scope | Should -Be 'user'
+    $Info.AppsAndFeaturesEntries[0].ProductCode | Should -Be 'SourceTree'
+    $Info.UninstallString | Should -Be '"%LocalAppData%\SourceTree\Update.exe" --uninstall'
+    $Info.QuietUninstallString | Should -Be '"%LocalAppData%\SourceTree\Update.exe" --uninstall -s'
     $Info.LauncherGeneration | Should -Be 'Squirrel.Windows'
     $Info.RequiredFrameworks | Should -Be @('net45')
     $Info.ResourceMetadata.FrameworkResourceValue | Should -Be 'net45'
@@ -782,6 +820,10 @@ Describe 'Squirrel parser' {
     $Info.LauncherGeneration | Should -Be 'Velopack'
     $Info.Architecture | Should -Be 'x64'
     $Info.MainExecutable | Should -Be 'Tower.exe'
+    $Info.AppsAndFeaturesEntries[0].ProductCode | Should -Be 'Tower'
+    $Info.UninstallString | Should -Be '"%LocalAppData%\Tower\Update.exe" --uninstall'
+    $Info.QuietUninstallString | Should -Be '"%LocalAppData%\Tower\Update.exe" --uninstall --silent'
+    $Info.DisplayIcon | Should -Be '%LocalAppData%\Tower\current\Tower.exe'
     $Info.PayloadArchitectures | Should -Be @('x64')
     $Info.PayloadArchitectureInfo.RelativePath | Should -Be 'lib/app/Tower.exe'
     $Info.PayloadArchitectureInfo.MachineName | Should -Be 'AMD64'

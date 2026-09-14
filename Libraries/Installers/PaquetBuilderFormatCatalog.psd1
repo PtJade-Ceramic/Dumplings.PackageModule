@@ -2,7 +2,7 @@
 # Structural Paquet Builder media profiles derived from archived builder
 # installers, current builder output, and the shipped runtime ABI.
 @{
-  CatalogVersion = 2
+  CatalogVersion = 3
   Profiles       = @(
     @{
       Id                    = 'ClassicResourcePackage'
@@ -23,7 +23,7 @@
       RuntimeMagic          = '4D5A'
       DescriptorResource    = 'ISFX'
       SupportsFileExpansion = $true
-      SupportsScriptScan    = $false
+      SupportsScriptScan    = $true
       ObservedBuilders      = '2.7.x'
     }
     @{
@@ -35,7 +35,7 @@
       RuntimeMagic          = '4D5A'
       OptionalResourceName  = 'ISFX'
       SupportsFileExpansion = $true
-      SupportsScriptScan    = $false
+      SupportsScriptScan    = $true
       ObservedBuilders      = '2.8.x'
     }
     @{
@@ -46,7 +46,7 @@
       RuntimeResourceName   = 'ENG'
       RuntimeMagic          = '4750'
       SupportsFileExpansion = $true
-      SupportsScriptScan    = $false
+      SupportsScriptScan    = $true
       ObservedBuilders      = '2.9.x'
     }
     @{

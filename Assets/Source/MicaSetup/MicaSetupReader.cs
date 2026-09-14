@@ -492,7 +492,12 @@ namespace Dumplings.MicaSetup
                     }
                     case 0x28:
                     case 0x6F: EvaluateCall(reader, (int)instruction.Operand, false, instruction.Offset, methodName, stack, assignments, result); break;
-                    case 0x72: Push(stack, SymbolicValue.Constant(reader.GetUserString(MetadataTokens.UserStringHandle((int)instruction.Operand)), "string")); break;
+                    case 0x72:
+                    {
+                        string value = reader.GetUserString(MetadataTokens.UserStringHandle((int)instruction.Operand));
+                        Push(stack, SymbolicValue.Constant(value, QuoteExpressionString(value)));
+                        break;
+                    }
                     case 0x73: EvaluateCall(reader, (int)instruction.Operand, true, instruction.Offset, methodName, stack, assignments, result); break;
                     case 0x8D:
                     {
@@ -666,18 +671,25 @@ namespace Dumplings.MicaSetup
 
         private static SymbolicValue EvaluateKnownReturn(MethodReferenceInfo method, SymbolicValue[] arguments, bool isNewObject)
         {
-            if (method.DeclaringType == "System.String" && method.Name == "Concat" && arguments.All(value => value.Resolved))
+            string callExpression = DescribeCall(method, arguments);
+            if (method.DeclaringType == "System.String" && method.Name == "Concat")
             {
-                return SymbolicValue.Constant(string.Concat(arguments.Select(value => value.Value == null ? string.Empty : Convert.ToString(value.Value))));
+                List<SymbolicValue> values = FlattenStringArguments(arguments);
+                if (values.All(value => value.FullyResolved))
+                {
+                    return SymbolicValue.Constant(string.Concat(values.Select(value => value.Value == null ? string.Empty : Convert.ToString(value.Value))), callExpression);
+                }
+                return SymbolicValue.Unknown(callExpression);
             }
             if (method.DeclaringType == "System.String" && method.Name == "Format" && arguments.Length > 0 && arguments[0].Resolved && arguments[0].Value is string)
             {
+                if (!arguments.Skip(1).All(value => value.FullyResolved)) { return SymbolicValue.Unknown(callExpression); }
                 try
                 {
-                    object[] formatArguments = arguments.Skip(1).Select(value => value.Resolved ? value.Value : "{" + value.Expression + "}").ToArray();
-                    return SymbolicValue.Constant(string.Format((string)arguments[0].Value, formatArguments));
+                    object[] formatArguments = arguments.Skip(1).Select(value => value.Value).ToArray();
+                    return SymbolicValue.Constant(string.Format((string)arguments[0].Value, formatArguments), callExpression);
                 }
-                catch (FormatException) { return SymbolicValue.Unknown("String.Format"); }
+                catch (FormatException) { return SymbolicValue.Unknown(callExpression); }
             }
             if (method.DeclaringType.StartsWith("System.Array", StringComparison.Ordinal) && method.Name == "Empty") { return SymbolicValue.Array(0); }
             if (isNewObject && method.DeclaringType == "MicaSetup.Helper.CloseApplicationInfo" && arguments.Length == 0)
@@ -685,8 +697,43 @@ namespace Dumplings.MicaSetup
                 return SymbolicValue.Object(method.DeclaringType);
             }
             if (isNewObject) { return SymbolicValue.Unknown("new " + method.DeclaringType); }
-            if (!IsVoid(method.ReturnType)) { return SymbolicValue.Unknown(method.DeclaringType + "." + method.Name + "()"); }
+            if (!IsVoid(method.ReturnType)) { return SymbolicValue.Unknown(callExpression); }
             return SymbolicValue.Unknown("void");
+        }
+
+        private static List<SymbolicValue> FlattenStringArguments(SymbolicValue[] arguments)
+        {
+            List<SymbolicValue> values = new List<SymbolicValue>();
+            foreach (SymbolicValue argument in arguments)
+            {
+                if (argument != null && argument.Value is SymbolicArray array)
+                {
+                    values.AddRange(array.Items.Select(item => item ?? SymbolicValue.Unknown("unset")));
+                }
+                else { values.Add(argument ?? SymbolicValue.Unknown("missing")); }
+            }
+            return values;
+        }
+
+        private static string DescribeCall(MethodReferenceInfo method, SymbolicValue[] arguments)
+        {
+            return method.DeclaringType + "." + method.Name + "(" + string.Join(", ", arguments.Select(DescribeValue)) + ")";
+        }
+
+        private static string DescribeValue(SymbolicValue value)
+        {
+            if (value == null) { return "missing"; }
+            if (value.Value is SymbolicArray array)
+            {
+                return "[" + string.Join(", ", array.Items.Select(item => item == null ? "unset" : DescribeValue(item))) + "]";
+            }
+            return string.IsNullOrWhiteSpace(value.Expression) ? "unknown" : value.Expression;
+        }
+
+        private static string QuoteExpressionString(string value)
+        {
+            if (value == null) { return "null"; }
+            return "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "\\r").Replace("\n", "\\n") + "\"";
         }
 
         private static void ReadWpfResources(Stream stream, PEReader peReader, MetadataReader reader, MicaSetupManagedInfo result, int maximumResources)

@@ -373,6 +373,88 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
       $Result.AppsAndFeaturesEntries[0].Publisher | Should -Be 'New Squirrel Publisher'
     }
 
+    It 'Updates generic EXE metadata from a detected InstallBuilder parser result' {
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{
+          ParserResults    = @([pscustomobject]@{
+              Name    = 'InstallBuilder'
+              Success = $true
+              Result  = [pscustomobject]@{
+                Metadata = [pscustomobject]@{
+                  InstallerType          = 'exe'
+                  ProductCode            = 'Parser Probe IB 4.5.6'
+                  DisplayName            = 'Parser Probe IB'
+                  DisplayVersion         = '4.5.6'
+                  Publisher              = 'Dumplings Validation'
+                  Scope                  = 'machine'
+                  DefaultInstallLocation = '%ProgramFiles(x86)%\probe'
+                }
+              }
+            })
+          FamilyCandidates = @()
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture           = 'x86'
+        InstallerType          = 'exe'
+        InstallerUrl           = $Script:InstallerUrl
+        Scope                  = 'user'
+        ProductCode            = 'Parser Probe IB 4.5.5'
+        InstallationMetadata   = [ordered]@{ DefaultInstallLocation = '%ProgramFiles(x86)%\probe-old' }
+        AppsAndFeaturesEntries = @([ordered]@{
+            DisplayName    = 'Parser Probe IB'
+            DisplayVersion = '4.5.5'
+            Publisher      = 'Dumplings Validation'
+            ProductCode    = 'Parser Probe IB 4.5.5'
+          })
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      @($Script:LogMessages.Where({ $_.Level -eq 'Warning' })).Count | Should -Be 0
+      $Result.ProductCode | Should -Be 'Parser Probe IB 4.5.6'
+      $Result.InstallationMetadata.DefaultInstallLocation | Should -Be '%ProgramFiles(x86)%\probe'
+      $Result.AppsAndFeaturesEntries[0].ProductCode | Should -Be 'Parser Probe IB 4.5.6'
+      $Result.AppsAndFeaturesEntries[0].DisplayVersion | Should -Be '4.5.6'
+    }
+
+    It 'Updates a Setup Factory ProductCode while preserving authored silent switches' {
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{
+          ParserResults    = @([pscustomobject]@{
+              Name    = 'Setup Factory'
+              Success = $true
+              Result  = [pscustomobject]@{
+                Metadata = [pscustomobject]@{
+                  InstallerType  = 'exe'
+                  ProductCode    = 'OutCALL2.0'
+                  DisplayName    = 'OutCALL'
+                  DisplayVersion = '2.0'
+                  Publisher      = 'Bicom Systems'
+                  Scope          = 'machine'
+                }
+              }
+            })
+          FamilyCandidates = @()
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture      = 'x86'
+        InstallerType     = 'exe'
+        InstallerUrl      = $Script:InstallerUrl
+        Scope             = 'machine'
+        ProductCode       = 'OutCALL1.9'
+        InstallerSwitches = [ordered]@{ Silent = '/S' }
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      @($Script:LogMessages.Where({ $_.Level -eq 'Warning' })).Count | Should -Be 0
+      $Result.ProductCode | Should -Be 'OutCALL2.0'
+      $Result.Scope | Should -Be 'machine'
+      $Result.InstallerSwitches.Silent | Should -Be '/S'
+    }
+
     It 'Preserves an existing ProductCode for Chromium <Variant>' -ForEach @(
       @{ Variant = 'ChromiumMiniInstaller'; ExistingProductCode = 'Google Chrome SxS' }
       @{ Variant = 'ChromiumUpdater'; ExistingProductCode = 'Zoho Ulaa' }

@@ -194,6 +194,7 @@
   'CreateInstall.Predecessor.sgpro.exe'                        = 'Builders\CreateInstall\Pre5\sgpro.exe'
   'CreateInstall.Generated.RunMsi.exe'                         = 'Builders\CreateInstall\Generated\RunMsi\runmsi-probe.exe'
   'CreateInstall.Generated.NoPayload.exe'                      = 'Builders\CreateInstall\Generated\NoPayload\no-payload-probe.exe'
+  'CreateInstall.Generated.Environment.exe'                    = 'Builders\CreateInstall\Generated\Environment\environment-probe.exe'
   'Lakes_SCREENView_4.0.1.exe'                                 = 'Installers\WinRarSfx\Lakes.SCREENView\4.0.1\Lakes_SCREENView_4.0.1.exe'
   'NM34_x64.exe'                                               = 'Installers\IExpress\Microsoft.NetMon\3.4\NM34_x64.exe'
   'Nessus-10.12.3-x64.msi'                                     = 'Installers\MSI\Tenable.Nessus\10.12.3\Nessus-10.12.3-x64.msi'
@@ -276,6 +277,7 @@
   'Communicator-7.6.0.exe'                                     = 'Installers\SetupFactory\BicomSystems.Communicator\7.6.0\Communicator-7.6.0.exe'
   'gloCOM-7.6.0.4.exe'                                         = 'Installers\SetupFactory\BicomSystems.gloCOM\7.6.0.4\gloCOM-7.6.0.4.exe'
   'SafeguardPDFViewer_v3.exe'                                  = 'Installers\SetupFactory\Locklizard.SafeguardPDFViewer\3.0.2.231\SafeguardPDFViewer_v3.exe'
+  'SetupFactory-3.1-builder.zip'                               = 'Installers\SetupFactory\IndigoRose.SetupFactory\HistoricalBuilders\3.1\suf310.zip'
   'SetupFactory-4-inst95.exe'                                  = 'Installers\SetupFactory\Historical\4.0.0.0\inst95.exe'
   'SetupFactory-5-ttally11.exe'                                = 'Installers\SetupFactory\Historical\5.0.0\ttally11.exe'
   'SetupFactory-6-suf60ev.exe'                                 = 'Installers\SetupFactory\Historical\6.0.1.2\suf60ev.exe'
@@ -295,4 +297,6 @@
   'SetupFactory-10.2.0-trial.exe'                              = 'Installers\SetupFactory\IndigoRose.SetupFactory\10.2.0\setup-factory-trial.exe'
   'Reasonix-windows-amd64-installer-1.17.13.exe'               = 'Installers\NSIS\ESEngine.ReasonixDesktop\1.17.13\Reasonix-windows-amd64-installer-1.17.13.exe'
   'TI-Connect-4.0.0.218.exe'                                   = 'Installers\Wise\TexasInstruments.TIConnect\4.0.0.218\TI-Connect-4.0.0.218.exe'
+  'NavigatorPlus-1.42-x86.exe'                                 = 'Installers\Wise\FrancotypPostalia.NavigatorPlus\1.42\FrancotypPostalia.NavigatorPlus.1.42.x86.exe'
+  'NavigatorPlus-1.42-x64.exe'                                 = 'Installers\Wise\FrancotypPostalia.NavigatorPlus\1.42\FrancotypPostalia.NavigatorPlus.1.42.x64.exe'
 }

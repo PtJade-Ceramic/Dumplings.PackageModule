@@ -422,6 +422,17 @@ Describe 'DeployMaster static parser' {
     }
   }
 
+  It 'Should expose the runtime URL fallback through the top-level parser contract' {
+    $FixturePath = Join-Path $Script:DeployMasterBehaviorFixtureDirectory 'Baseline.exe'
+    if (-not (Test-Path -LiteralPath $FixturePath)) { Set-ItResult -Skipped -Because 'The controlled DeployMaster behavior fixture is not cached.'; return }
+
+    $Info = Get-DeployMasterInfo -Path $FixturePath
+    $Info.PackageUrl | Should -BeNullOrEmpty
+    $Info.HelpLink | Should -Be $Info.PublisherUrl
+    $Info.URLInfoUpdate | Should -Be $Info.PublisherUrl
+    $Info.URLInfoAbout | Should -Be $Info.PublisherUrl
+  }
+
   It 'Should split non-numeric display versions into string version components' {
     InModuleScope DeployMaster {
       $Identity = [pscustomobject]@{

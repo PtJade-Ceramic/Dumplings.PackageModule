@@ -1917,7 +1917,7 @@ function Get-ZeroInstallImplementationManifest {
   .PARAMETER Path
     Existing implementation directory to inspect.
   .PARAMETER Algorithm
-    Zero Install manifest format. SHA256New is the current preferred format.
+    Zero Install manifest format. Sha1 is the legacy format with directory timestamps; SHA256New is the current preferred format.
   .PARAMETER ExecutablePath
     Relative paths whose manifest records use X rather than F. Windows cannot preserve Unix executable bits, so callers extracting archives must supply this evidence.
   .PARAMETER MaximumEntries
@@ -1930,7 +1930,7 @@ function Get-ZeroInstallImplementationManifest {
   [OutputType([object])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
-    [ValidateSet('Sha1New', 'Sha256', 'Sha256New')][string]$Algorithm = 'Sha256New',
+    [ValidateSet('Sha1', 'Sha1New', 'Sha256', 'Sha256New')][string]$Algorithm = 'Sha256New',
     [AllowEmptyCollection()][string[]]$ExecutablePath = @(),
     [ValidateRange(1, [int]::MaxValue)][int]$MaximumEntries = 65536,
     [ValidateRange(1, [long]::MaxValue)][long]$MaximumBytes = 2147483648
@@ -1949,7 +1949,7 @@ function Test-ZeroInstallImplementationDigest {
   .PARAMETER Path
     Existing implementation directory to hash.
   .PARAMETER Digest
-    Expected sha1new=, sha256=, or sha256new_ digest.
+    Expected sha1=, sha1new=, sha256=, or sha256new_ digest.
   .PARAMETER ExecutablePath
     Relative paths represented as executable files in the manifest.
   .PARAMETER MaximumEntries
@@ -1969,7 +1969,7 @@ function Test-ZeroInstallImplementationDigest {
     [switch]$PassThru
   )
 
-  $Algorithm = if ($Digest.StartsWith('sha256new_', [StringComparison]::Ordinal)) { 'Sha256New' } elseif ($Digest.StartsWith('sha256=', [StringComparison]::Ordinal)) { 'Sha256' } elseif ($Digest.StartsWith('sha1new=', [StringComparison]::Ordinal)) { 'Sha1New' } elseif ($Digest.StartsWith('sha1=', [StringComparison]::Ordinal)) { throw 'The legacy sha1= Zero Install manifest format is not supported; use sha1new or sha256new evidence.' } else { throw "Unsupported Zero Install manifest digest: $Digest" }
+  $Algorithm = if ($Digest.StartsWith('sha256new_', [StringComparison]::Ordinal)) { 'Sha256New' } elseif ($Digest.StartsWith('sha256=', [StringComparison]::Ordinal)) { 'Sha256' } elseif ($Digest.StartsWith('sha1new=', [StringComparison]::Ordinal)) { 'Sha1New' } elseif ($Digest.StartsWith('sha1=', [StringComparison]::Ordinal)) { 'Sha1' } else { throw "Unsupported Zero Install manifest digest: $Digest" }
   $Result = Get-ZeroInstallImplementationManifest -Path $Path -Algorithm $Algorithm -ExecutablePath $ExecutablePath -MaximumEntries $MaximumEntries -MaximumBytes $MaximumBytes
   $IsMatch = $Result.Digest -ceq $Digest
   if (-not $PassThru) { return $IsMatch }
@@ -2045,8 +2045,10 @@ function Add-ZeroInstallImplementationDirectory {
     Mutable offline recipe context.
   .PARAMETER RelativePath
     Implementation-relative directory path.
+  .PARAMETER ModifiedTime
+    Optional source archive timestamp retained for legacy sha1 manifests.
   #>
-  param ([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][string]$RelativePath)
+  param ([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][string]$RelativePath, [AllowNull()]$ModifiedTime)
 
   $RelativePath = ConvertTo-ZeroInstallSafeRelativePath -Root $Context.Root -Path $RelativePath
   $Target = Resolve-SafeExtractionPath -DestinationPath $Context.Root -RelativePath $RelativePath
@@ -2054,6 +2056,11 @@ function Add-ZeroInstallImplementationDirectory {
   if (-not (Test-Path -LiteralPath $Target)) {
     if (++$Context.EntryCount -gt $Context.MaximumEntries) { throw "The Zero Install recipe exceeds the $($Context.MaximumEntries)-entry limit." }
     $null = New-Item -Path $Target -ItemType Directory -Force
+  }
+  if ($null -ne $ModifiedTime) {
+    $Timestamp = [datetime]$ModifiedTime
+    if ($Timestamp.Kind -eq [DateTimeKind]::Unspecified) { $Timestamp = [datetime]::SpecifyKind($Timestamp, [DateTimeKind]::Utc) }
+    $Context.DirectoryTimestamps[$RelativePath] = $Timestamp.ToUniversalTime()
   }
 }
 
@@ -2183,7 +2190,6 @@ function Expand-ZeroInstallArchiveStep {
         if (-not $ArchivePaths.Add($RelativePath)) { throw "The Zero Install archive contains a duplicate output path: $RelativePath" }
         $Mode = ([int]$Entry.ExternalAttributes -shr 16) -band 0xFFFF
         if (($Mode -band 0xF000) -eq 0xA000) { throw "Zero Install ZIP symlinks are not supported by the offline extractor: $($Entry.FullName)" }
-        if ($Entry.FullName.EndsWith('/', [StringComparison]::Ordinal) -or ($Mode -band 0xF000) -eq 0x4000) { Add-ZeroInstallImplementationDirectory -Context $Context -RelativePath $RelativePath; continue }
         $DosTimestamp = $Entry.LastWriteTime.DateTime
         $ModifiedTime = $DosTimestamp
         if ($ZipTimestamps.ContainsKey($Entry.FullName)) {
@@ -2195,6 +2201,7 @@ function Expand-ZeroInstallArchiveStep {
           else { $ModifiedTime = [datetime]::SpecifyKind($DosTimestamp, [DateTimeKind]::Utc) }
         }
         if ($ModifiedTime.Year -eq 1980 -and $ModifiedTime.Month -eq 1 -and $ModifiedTime.Day -eq 1 -and $ModifiedTime.TimeOfDay -eq [TimeSpan]::Zero) { $ModifiedTime = $ModifiedTime.AddDays(-1) }
+        if ($Entry.FullName.EndsWith('/', [StringComparison]::Ordinal) -or ($Mode -band 0xF000) -eq 0x4000) { Add-ZeroInstallImplementationDirectory -Context $Context -RelativePath $RelativePath -ModifiedTime $ModifiedTime; continue }
         $EntryStream = $Entry.Open()
         try { Add-ZeroInstallImplementationFile -Context $Context -RelativePath $RelativePath -Stream $EntryStream -Length $Entry.Length -ModifiedTime $ModifiedTime -Executable (($Mode -band 0x49) -ne 0) } finally { $EntryStream.Dispose() }
       }
@@ -2210,7 +2217,7 @@ function Expand-ZeroInstallArchiveStep {
       if ([string]::IsNullOrWhiteSpace($RelativePath)) { continue }
       if (-not $ArchivePaths.Add($RelativePath)) { throw "The Zero Install archive contains a duplicate output path: $RelativePath" }
       if (-not [string]::IsNullOrWhiteSpace([string]$Entry.LinkTarget)) { throw "Zero Install archive links are not supported by the offline extractor: $($Entry.Key)" }
-      if ($Entry.IsDirectory) { Add-ZeroInstallImplementationDirectory -Context $Context -RelativePath $RelativePath; continue }
+      if ($Entry.IsDirectory) { Add-ZeroInstallImplementationDirectory -Context $Context -RelativePath $RelativePath -ModifiedTime $Entry.LastModifiedTime; continue }
       if ([long]$Entry.Size -lt 0) { throw "The Zero Install archive entry has an unknown expanded size: $($Entry.Key)" }
 
       $Executable = $false
@@ -2364,6 +2371,7 @@ function Expand-ZeroInstallImplementation {
     MaximumEntries  = $MaximumEntries
     MaximumBytes    = $MaximumExpandedBytes
     ExecutablePaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    DirectoryTimestamps = [Collections.Generic.Dictionary[string, datetime]]::new([StringComparer]::OrdinalIgnoreCase)
   }
   try {
     foreach ($Step in $Steps) {
@@ -2405,6 +2413,13 @@ function Expand-ZeroInstallImplementation {
         'copy-from' { Copy-ZeroInstallImplementationSource -Context $Context -Step $Step -SourceImplementation $SourceImplementation }
         default { throw "Unsupported Zero Install recipe step: $($Step.Kind)" }
       }
+    }
+
+    # File writes alter their parent directory timestamps. Restore source archive directory
+    # timestamps only after every recipe operation so the legacy sha1 manifest is reproducible.
+    foreach ($Entry in @($Context.DirectoryTimestamps.GetEnumerator() | Sort-Object { ($_.Key -split '/').Count } -Descending)) {
+      $DirectoryPath = Resolve-SafeExtractionPath -DestinationPath $StagingPath -RelativePath $Entry.Key
+      if (Test-Path -LiteralPath $DirectoryPath -PathType Container) { (Get-Item -LiteralPath $DirectoryPath -Force).LastWriteTimeUtc = $Entry.Value }
     }
 
     $ExpectedDigest = [string]$Implementation.ManifestDigest.Best

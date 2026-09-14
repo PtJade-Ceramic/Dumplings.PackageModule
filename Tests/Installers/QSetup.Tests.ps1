@@ -252,9 +252,9 @@ SET_PERFORM_XML_OP(|<InstallDir>\probe.xml|/root/name|Value|Create|Remove|);
   It 'Should prefer a compiled historical shortcut and avoid an unverified 8-11 fallback' {
     InModuleScope QSetup {
       $CompiledDirective = @{
-        SET_COMPOSER_BUILD = [Collections.Generic.List[object]]@('8.1.0.2')
-        SET_MEDIA_NAME = [Collections.Generic.List[object]]@('ProductSetup')
-        SET_PROG_STAMP = [Collections.Generic.List[object]]@('12345')
+        SET_COMPOSER_BUILD          = [Collections.Generic.List[object]]@('8.1.0.2')
+        SET_MEDIA_NAME              = [Collections.Generic.List[object]]@('ProductSetup')
+        SET_PROG_STAMP              = [Collections.Generic.List[object]]@('12345')
         SET_START_PROGRAM_LINK_ITEM = [Collections.Generic.List[object]]@('|Uninstall Product|<Application Folder>UnInstall_12345.exe|')
       }
       $Compiled = Get-QSetupUninstallerInfo -Directive $CompiledDirective -InstallLocation '%ProgramFiles%\Product'
@@ -263,8 +263,8 @@ SET_PERFORM_XML_OP(|<InstallDir>\probe.xml|/root/name|Value|Create|Remove|);
 
       $UnprovenDirective = @{
         SET_COMPOSER_BUILD = [Collections.Generic.List[object]]@('8.1.0.2')
-        SET_MEDIA_NAME = [Collections.Generic.List[object]]@('ProductSetup')
-        SET_PROG_STAMP = [Collections.Generic.List[object]]@('12345')
+        SET_MEDIA_NAME     = [Collections.Generic.List[object]]@('ProductSetup')
+        SET_PROG_STAMP     = [Collections.Generic.List[object]]@('12345')
       }
       $Unproven = Get-QSetupUninstallerInfo -Directive $UnprovenDirective -InstallLocation '%ProgramFiles%\Product'
       $Unproven.Name | Should -BeNullOrEmpty
@@ -275,7 +275,7 @@ SET_PERFORM_XML_OP(|<InstallDir>\probe.xml|/root/name|Value|Create|Remove|);
   It 'Should decode comma, compact-pipe, and extended shortcut records' {
     InModuleScope QSetup {
       $Directive = @{
-        SET_TARGET_DIR = [Collections.Generic.List[object]]@('<ProgramFiles>\Product')
+        SET_TARGET_DIR              = [Collections.Generic.List[object]]@('<ProgramFiles>\Product')
         SET_START_PROGRAM_LINK_ITEM = [Collections.Generic.List[object]]@(
           'Uninstall Product,<Application Folder>UnInstall_12345.exe',
           '|Product site|https://example.test/|',
@@ -480,7 +480,7 @@ SET_PERFORM_XML_OP(|<InstallDir>\probe.xml|/root/name|Value|Create|Remove|);
 
   It 'Should classify the direct-record and double-pipe historical routes' -ForEach @(
     @{ Name = 'direct'; Prefix = $null; FooterRoute = 'Compact12'; Generation = 'Legacy1-2'; PreambleRoute = 'DirectRecords' }
-    @{ Name = 'double-pipe'; Prefix = 'DoublePipe'; FooterRoute = 'Legacy74'; Generation = 'Legacy3-5'; PreambleRoute = 'DoublePipePreamble' }
+    @{ Name = 'double-pipe'; Prefix = 'DoublePipe'; FooterRoute = 'Legacy74'; Generation = 'Legacy3-6'; PreambleRoute = 'DoublePipePreamble' }
   ) {
     $SetupText = "SET_COMPOSER_BUILD(5.0);`r`nSET_PROG_NAME(Historical QSetup);"
     $RecordBytes = ConvertTo-TestQSetupRecord -Name 'Setup.txt' -Content ([Text.Encoding]::UTF8.GetBytes($SetupText))
@@ -524,6 +524,39 @@ SET_PERFORM_XML_OP(|<InstallDir>\probe.xml|/root/name|Value|Create|Remove|);
     }
   }
 
+  It 'Should decode the QSetup 6 transitional execution layout' {
+    InModuleScope QSetup {
+      $Fields = [string[]]::new(67)
+      $Fields[0] = '^'
+      $Fields[2] = 'Remove marker'
+      $Fields[3] = 'UnInstall End'
+      $Fields[4] = '10'
+      $Fields[5] = 'Conditional'
+      $Fields[7] = '1'
+      $Fields[8] = 'Environment Variable Is'
+      $Fields[20] = '1'
+      $Fields[21] = 'Remove Registry Key'
+      $Fields[33] = '^'
+      $Fields[35] = 'MARKER'
+      $Fields[36] = '='
+      $Fields[37] = '1'
+      $Fields[47] = 'HKEY_CURRENT_USER\Software\Example'
+      $Fields[66] = '^'
+
+      $Action = ConvertFrom-QSetupExecutionAction -Content ($Fields -join '|')
+
+      $Action.LayoutRoute | Should -Be 'TransitionalFourCommand'
+      $Action.ConditionMode | Should -Be 'Conditional'
+      $Action.Conditions | Should -HaveCount 1
+      $Action.Conditions[0].Predicate | Should -Be 'Environment Variable Is'
+      $Action.Conditions[0].Argument1 | Should -Be 'MARKER'
+      $Action.Commands | Should -HaveCount 1
+      $Action.Commands[0].Name | Should -Be 'Remove Registry Key'
+      $Action.Commands[0].Argument1 | Should -Be 'HKEY_CURRENT_USER\Software\Example'
+      $Action.ObservedTrailingFields | Should -HaveCount 7
+    }
+  }
+
   It 'Should normalize deterministic aliases and parent segments' {
     InModuleScope QSetup {
       $Directive = @{
@@ -548,8 +581,12 @@ SET_PERFORM_XML_OP(|<InstallDir>\probe.xml|/root/name|Value|Create|Remove|);
 
   It 'Should parse representative historical Pantaray media' -ForEach @(
     @{ Version = '1.0.0.1'; Sha256 = 'C9C3F625295DCB5CB3675B79DFEE8EB5C9FF9E4B7ADEB93D395AF53D40A70EFB'; Generation = 'Legacy1-2'; Footer = 'Compact12'; ActionRoute = 'LegacyFourCommand'; UninstallerName = 'UnInstall_24376.exe'; UninstallerRoute = 'CompiledShortcutTarget' }
-    @{ Version = '5.0.0.0'; Sha256 = '606EF42EF079CC630F79D6E9013F65BE67EBA64E2D7AF99CEDBEA6F07089D629'; Generation = 'Legacy3-5'; Footer = 'Legacy74'; ActionRoute = 'LegacyFourCommand'; UninstallerName = 'UnInstall_17836.exe'; UninstallerRoute = 'CompiledShortcutTarget' }
-    @{ Version = '8.1.0.2'; Sha256 = '88C8F4BD3819696C765A1FF33935BA769BE6658DB9E1334FB1CD89FCA74C189C'; Generation = 'Legacy7-8'; Footer = 'Legacy74'; ActionRoute = 'ModernSixCommand'; UninstallerName = 'un_qstp.exe'; UninstallerRoute = 'ExplicitName' }
+    @{ Version = '5.0.0.0'; Sha256 = '606EF42EF079CC630F79D6E9013F65BE67EBA64E2D7AF99CEDBEA6F07089D629'; Generation = 'Legacy3-6'; Footer = 'Legacy74'; ActionRoute = 'LegacyFourCommand'; UninstallerName = 'UnInstall_17836.exe'; UninstallerRoute = 'CompiledShortcutTarget' }
+    @{ Version = '6.0.0.0'; Sha256 = 'B79B711D651C0C81B5C615F799355448F9E32A78613955AED297493833ACA455'; Generation = 'Legacy3-6'; Footer = 'Legacy74'; ActionRoute = 'TransitionalFourCommand'; UninstallerName = 'UnInstall_17836.exe'; UninstallerRoute = 'CompiledShortcutTarget' }
+    @{ Version = '8.1.0.2'; Sha256 = '88C8F4BD3819696C765A1FF33935BA769BE6658DB9E1334FB1CD89FCA74C189C'; Generation = 'Legacy7-11'; Footer = 'Legacy74'; ActionRoute = 'ModernSixCommand'; UninstallerName = 'un_qstp.exe'; UninstallerRoute = 'ExplicitName' }
+    @{ Version = '9.1.0.6'; Sha256 = 'D1333B3ADED325EC53FAFEBBC1A1A25A0B98196CF3B23346F13F147A42444CCB'; Generation = 'Legacy7-11'; Footer = 'Legacy74'; ActionRoute = 'ModernSixCommand'; UninstallerName = 'un_qstp.exe'; UninstallerRoute = 'ExplicitName' }
+    @{ Version = '10.0.2.1'; Sha256 = 'DA057E341AE9B38AB2DB1E912C5A047561D2E601E2CE5F1AE765943216EF6724'; Generation = 'Legacy7-11'; Footer = 'Legacy74'; ActionRoute = 'ModernSixCommand'; UninstallerName = 'uninstall_qstp.exe'; UninstallerRoute = 'ExplicitName' }
+    @{ Version = '11.0.0.0'; Sha256 = 'C319CB5AF27757FFCB2333B02911C2F28964B57DE23B95278F9FFD22919133AB'; Generation = 'Legacy7-11'; Footer = 'Legacy74'; ActionRoute = 'ModernSixCommand'; UninstallerName = 'uninstall_qstp.exe'; UninstallerRoute = 'ExplicitName' }
   ) {
     $RelativePath = "Installers\QSetup\Pantaray.QSetup\$Version\qstp.exe"
     $Fixture = Resolve-DumplingsTestFixturePath -RelativePath $RelativePath
@@ -566,6 +603,7 @@ SET_PERFORM_XML_OP(|<InstallDir>\probe.xml|/root/name|Value|Create|Remove|);
     $Info.ExecutionActions[0].LayoutRoute | Should -Be $ActionRoute
     $Info.Uninstaller.Name | Should -Be $UninstallerName
     $Info.Uninstaller.NamingRoute | Should -Be $UninstallerRoute
+    $Info.UnresolvedFields | Should -BeNullOrEmpty
     $Info.CanExpand | Should -BeTrue
     $Info.PayloadCatalog | Should -Not -BeNullOrEmpty
     @($Info.PayloadCatalog | Where-Object { -not $_.InstalledPath }) | Should -BeNullOrEmpty

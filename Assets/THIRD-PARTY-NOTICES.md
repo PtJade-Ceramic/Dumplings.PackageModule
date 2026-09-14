@@ -168,6 +168,20 @@ The complete MIT license is included at `Assets/Source/Kachina/LICENSE`.
 
 Copyright (c) 2023-2026 Contributors
 
+## SabreTools.IO and SabreTools.Serialization
+
+Sources: <https://github.com/SabreTools/SabreTools.IO> and <https://github.com/SabreTools/SabreTools.Serialization>
+
+`Assets/Assemblies/SabreTools.IO.dll` 2.3.0 and `Assets/Assemblies/SabreTools.Serialization.dll` 3.2.0 provide the bounded New Executable and WiseScript object readers used by `Libraries/Installers/Wise.psm1`. The Serialization assembly is rebuilt from the corresponding source with its two unconditional `Console.WriteLine` diagnostics removed so parser calls remain side-effect free; parsing behavior and public types are otherwise unchanged.
+
+Copyright (c) Matt Nadareski 2019-2026
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 ## Tauri
 
 Source: <https://github.com/tauri-apps/tauri>

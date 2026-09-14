@@ -1963,6 +1963,17 @@ function Get-AstrumInstallWizardInfo {
       }
       if (-not $Scope) { $UnresolvedFields.Add('Scope') }
       $SupportedScopes = $Scope ? @($Scope) : @('machine', 'user')
+      # A manifest requesting asInvoker does not make machine-protected writes usable without
+      # elevation. Controlled Modern2 validation proves that this route refuses cleanly when
+      # unelevated, while the same artifact installs when its caller is already elevated.
+      $RequiresProtectedMachineWrites = $Scope -eq 'machine' -and (
+        @($RegistryWrites | Where-Object Root -EQ 'HKLM').Count -gt 0 -or
+        $InstallLocation -match '^%(?:ProgramFiles(?:\(x86\))?|WINDIR|SystemRoot)%'
+      )
+      $ElevationRequirement = if ($ExecutionLevel -eq 'requireAdministrator' -or $Configuration.RequireAdmin -or $RequiresProtectedMachineWrites) { 'elevationRequired' } else { $null }
+      if ($RequiresProtectedMachineWrites -and $ExecutionLevel -eq 'asInvoker' -and -not $Configuration.RequireAdmin) {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'Astrum.Elevation.CallerRequired' -Source 'Astrum InstallWizard' -Message 'The installer requests as-invoker execution but targets machine-protected registry or file-system state. It must be started by an elevated caller; controlled VM validation shows that unelevated /silent execution refuses without partial installation.' -Kind Information -Areas Installability -AffectedFields ElevationRequirement -Evidence ([ordered]@{ RequestedExecutionLevel = $ExecutionLevel; Scope = $Scope; InstallLocation = $InstallLocation })))
+      }
       $AssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
       foreach ($Diagnostic in $AssociationInfo.Diagnostics) { $Diagnostics.Add($Diagnostic) }
 
@@ -2059,7 +2070,7 @@ function Get-AstrumInstallWizardInfo {
         TinyWrapper                              = $ResolvedContainer.TinyWrapper
         CompanionFiles                           = @($ResolvedCompanions.FullName)
         RequestedExecutionLevel                  = $ExecutionLevel
-        ElevationRequirement                     = ($ExecutionLevel -eq 'requireAdministrator' -or $Configuration.RequireAdmin) ? 'elevationRequired' : $null
+        ElevationRequirement                     = $ElevationRequirement
         SupportedScopes                          = $SupportedScopes
         RegistryView                             = $RegistryView
         RegistryWrites                           = $RegistryWrites

@@ -277,6 +277,16 @@ Describe 'CreateInstall static parser' {
     $Info.UninstallString | Should -Be '"%ProgramFiles(x86)%\CreateInstall\uninstall.exe"'
     $Info.AppsAndFeaturesEntries[0].PSObject.Properties.Name | Should -Not -Contain 'UninstallString'
     @($Info.RegistryWrites | Where-Object Name -EQ 'NoModify').Count | Should -Be ([int]$WritesNoModify)
+    if ($Version -ne '5.9.0') {
+      $Info.SupportsSilentInstallation | Should -BeTrue
+      $Info.InstallModes | Should -Be @('interactive', 'silent', 'silentWithProgress')
+      $Info.InstallerSwitches.Silent | Should -Be '-silent'
+      $Info.InstallerSwitches.SilentWithProgress | Should -Be '-silent'
+    } else {
+      $Info.SupportsSilentInstallation | Should -BeFalse
+      $Info.InstallModes | Should -Be @('interactive')
+      @($Info.InstallerSwitches.Keys).Count | Should -Be 0
+    }
     $Info.Diagnostics.Kind | Should -Not -Contain 'Invalid'
   }
 
@@ -299,6 +309,15 @@ Describe 'CreateInstall static parser' {
       $Evidence.AppsAndFeaturesEntries | Should -HaveCount 1
       $Evidence.Entries | Should -HaveCount 2
       $Evidence.Diagnostics.Id | Should -Be @('CreateInstall.ARP.Hidden')
+    }
+  }
+
+  It 'Should promote conditional registry evidence only to fields addressed by its key' {
+    InModuleScope CreateInstall {
+      Get-CreateInstallRegistryAffectedField -Root HKLM -Key 'Software\Vendor\Product' | Should -BeNullOrEmpty
+      Get-CreateInstallRegistryAffectedField -Root HKLM -Key 'Software\Microsoft\Windows\CurrentVersion\Uninstall\Product' | Should -Be @('ProductCode', 'AppsAndFeaturesEntries')
+      Get-CreateInstallRegistryAffectedField -Root HKCU -Key 'Software\Classes\.example' | Should -Be @('Protocols', 'FileExtensions')
+      Get-CreateInstallRegistryAffectedField -Root HKCU -Key 'Software\#dynamic#' -UnresolvedMacros dynamic | Should -Be @('ProductCode', 'AppsAndFeaturesEntries', 'Protocols', 'FileExtensions')
     }
   }
 
@@ -339,6 +358,8 @@ Describe 'CreateInstall static parser' {
       $AddCommand = { param([uint32]$Command, [object]$Operand) $CallerCommands.Add((New-TestCommand -Command $Command -Operand $Operand -Index $CallerCommands.Count)) }
       & $AddCommand 25 $EnvironmentOffset; & $AddCommand 100 $null
       & $AddCommand 34 'PATH'; & $AddCommand 34 '#setuppath#\bin'; & $AddCommand 25 ([uint32]3); & $AddCommand 34 ''; & $AddCommand 101 $null
+      & $AddCommand 34 'PATH'; & $AddCommand 34 '#setuppath#\old'; & $AddCommand 25 ([uint32]1); & $AddCommand 34 ''; & $AddCommand 102 $null
+      & $AddCommand 34 'PATH'; & $AddCommand 34 '#setuppath#\unknown'; & $AddCommand 25 ([uint32]2); & $AddCommand 34 ''; & $AddCommand 103 $null
       foreach ($Value in @('x64', '00000101', 'or', 'checkret', 'Visual C++ is required', '')) { & $AddCommand 34 $Value }; & $AddCommand 120 $null
       foreach ($Value in @('#setuppath#', 'service.exe', 'DumplingsService', 'Dumplings Service', 'Parser evidence service')) { & $AddCommand 34 $Value }
       & $AddCommand 25 ([uint32]3); & $AddCommand 25 ([uint32]1); & $AddCommand 34 ''; & $AddCommand 111 $null
@@ -348,7 +369,9 @@ Describe 'CreateInstall static parser' {
 
       $Functions = [Collections.Generic.Dictionary[uint32, object]]::new()
       $Functions[100] = New-TestFunction 100 1 'Environment'
-      $Functions[101] = New-TestFunction 101 4 'Environment g_append'
+      $Functions[101] = New-TestFunction 101 4 'Environment g_append' @() 256 @('g_append', 'g_append', ';', 'Environment')
+      $Functions[102] = New-TestFunction 102 4 'Environment g_append' @() 256 @('g_append', 'Environment', '', 'g_append', 'g_append', ';', 'Environment')
+      $Functions[103] = New-TestFunction 103 4 'Environment g_append' @() 256 @('Environment', 'g_append')
       $Functions[110] = New-TestFunction 110 6 'System\CurrentControlSet\Services\'
       $Functions[111] = New-TestFunction 111 7 '' @((New-TestCommand 110 $null 0))
       $Functions[120] = New-TestFunction 120 6 'SOFTWARE\Classes\Installer\Products\ RuntimeMinimum'
@@ -364,9 +387,11 @@ Describe 'CreateInstall static parser' {
       $Service = Get-CreateInstallServiceEvidence -Program $Program -ProjectVariableEvidence $Project -Is32Bit $true
       $Registration = Get-CreateInstallRegistrationEvidence -Program $Program -ProjectVariableEvidence $Project -Is32Bit $true
 
-      $Environment.EnvironmentChanges | Should -HaveCount 2
+      $Environment.EnvironmentChanges | Should -HaveCount 4
       ($Environment.EnvironmentChanges | Where-Object Operation -EQ Set).Value | Should -Be '%ProgramFiles(x86)%\Evidence'
-      ($Environment.EnvironmentChanges | Where-Object Operation -EQ AppendOrRemove).Scope | Should -Be 'both'
+      ($Environment.EnvironmentChanges | Where-Object Operation -EQ Append).Scope | Should -Be 'both'
+      ($Environment.EnvironmentChanges | Where-Object Operation -EQ Remove).Value | Should -Be '%ProgramFiles(x86)%\Evidence\old'
+      ($Environment.EnvironmentChanges | Where-Object Operation -EQ AppendOrRemove).Scope | Should -Be 'user'
       $Environment.Diagnostics.Id | Should -Contain 'CreateInstall.Environment.AppendDeleteAmbiguous'
       $Prerequisite.PrerequisiteChecks | Should -HaveCount 1
       $Prerequisite.PrerequisiteChecks[0].Versions | Should -Be @('2015', '2019')
@@ -528,6 +553,8 @@ Describe 'CreateInstall static parser' {
     $Info.Diagnostics.Id | Should -Contain 'CreateInstall.Shortcut.Conditional'
     $Info.Diagnostics.Id | Should -Contain 'CreateInstall.Run.Conditional'
     $Info.Diagnostics.Id | Should -Contain 'CreateInstall.Registry.Conditional'
+    $RegistryDiagnostic = $Info.Diagnostics | Where-Object Id -EQ 'CreateInstall.Registry.Conditional'
+    $RegistryDiagnostic.AffectedFields | Should -BeNullOrEmpty
     $Info.PrerequisiteChecks | Should -HaveCount 1
     $Info.PrerequisiteChecks[0].Versions | Should -Be @('2019')
     $Info.PrerequisiteChecks[0].PackageDependencyCandidates | Should -Be @('Microsoft.VCRedist.2015+.x86')
@@ -644,6 +671,19 @@ Describe 'CreateInstall static parser' {
     $Info.Diagnostics.Kind | Should -Not -Contain 'Invalid'
   }
 
+  It 'Should distinguish source-generated environment append and delete routines' {
+    $FixturePath = Resolve-DumplingsTestFixturePath -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'CreateInstall.Generated.Environment.exe')
+    if (-not (Test-DumplingsTestFixtureCacheEntry -Path $FixturePath -Sha256 '9B058C3E93219A4A6366D37190CFD135762C5F1EF0EF10E002EEE8712FDB05B3')) { Set-ItResult -Skipped -Because 'Cache the source-generated CreateInstall environment-operation fixture.'; return }
+
+    $Info = Get-CreateInstallInfo -Path $FixturePath
+
+    $Info.EnvironmentChanges | Should -HaveCount 2
+    $Info.EnvironmentChanges.Operation | Should -Be @('Append', 'Remove')
+    $Info.EnvironmentChanges.Value | Should -Be @('%ProgramFiles(x86)%\Dumplings CreateInstall Machine\append', '%ProgramFiles(x86)%\Dumplings CreateInstall Machine\delete')
+    $Info.EnvironmentChanges.Scope | Should -Be @('both', 'both')
+    $Info.Diagnostics.Id | Should -Not -Contain 'CreateInstall.Environment.AppendDeleteAmbiguous'
+  }
+
   It 'Should accept a source-generated no-payload project without fabricating an archive' {
     $FixturePath = Resolve-DumplingsTestFixturePath -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'CreateInstall.Generated.NoPayload.exe')
     if (-not (Test-DumplingsTestFixtureCacheEntry -Path $FixturePath -Sha256 '7E961D905C07BFF8E4AFFE4DBC2AD20D51BC11D44E91E27A07C06988FE0BF14E')) { Set-ItResult -Skipped -Because 'Cache the source-generated CreateInstall no-payload fixture.'; return }
@@ -656,6 +696,12 @@ Describe 'CreateInstall static parser' {
     $Info.CanExpand | Should -BeFalse
     $Info.Diagnostics.Id | Should -Contain 'CreateInstall.Archive.Absent'
     $Info.Diagnostics.Kind | Should -Not -Contain 'Invalid'
+
+    $Analysis = Get-WinGetInstallerAnalysis -Path $FixturePath
+    $Analysis.DetectedFamilies.Family | Should -Contain 'CreateInstall'
+    $Analysis.SuggestedManifestFields.InstallerType | Should -Be 'exe'
+    $Analysis.SuggestedManifestFields.PSObject.Properties.Name | Should -Not -Contain 'InstallerSwitches'
+    $Analysis.SuggestedManifestFields.PSObject.Properties.Name | Should -Not -Contain 'Scope'
   }
 
   It 'Should validate the GE header CRC the way the reference ge_load does' {

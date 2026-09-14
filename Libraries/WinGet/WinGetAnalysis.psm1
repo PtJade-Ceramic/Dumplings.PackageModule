@@ -162,8 +162,8 @@ function Get-WinGetInstallerFamilyTemplate {
         InstallerType = 'exe'
         Notes         = @(
           'Use Get-AstrumInstallWizardInfo once for compiled registry, ARP, operation, payload, architecture, and dependency evidence.',
-          'Verified 2.x media uses /silent and reports exit code 1 as success. Exact parser evidence adds /AcceptLicense when required and removes silent mode when the standard User Information dialog is compiled.',
-          'Astrum 1.x requires builder-version or VM evidence because silent support was introduced during that generation.',
+          'Verified 2.x media uses /silent and reports exit code 1 as success. Exact parser evidence adds /AcceptLicense when required; an Early2 User Information dialog remains interactive-only, while VM-validated Modern2 runtimes skip that dialog during silent installation.',
+          'Astrum 1.x requires a delimited /SILENT token in the exact runtime or artifact-specific VM evidence because silent support was introduced during that generation.',
           'Spanned media and tiny wrappers require a structurally verified route before extraction.'
         )
       }
@@ -181,11 +181,8 @@ function Get-WinGetInstallerFamilyTemplate {
     }
     'Setup Factory' {
       [pscustomobject]@{
-        InstallerType       = 'exe'
-        InstallModes        = @('interactive', 'silent')
-        InstallerSwitches   = [ordered]@{ Silent = '/S' }
-        ExpectedReturnCodes = @()
-        Notes               = @('Use Get-SetupFactoryInfo for structured session variables, built-in uninstall settings, literal registry actions, ProductCode, publisher, and scope.', 'Verify case-sensitive switches and any required no-restart option in a VM.')
+        InstallerType = 'exe'
+        Notes         = @('Use Get-SetupFactoryInfo for structured session variables, built-in uninstall settings, literal registry actions, ProductCode, publisher, scope, and silent-mode evidence.', 'Setup Factory 3.1, 4, and 5 are interactive-only, version 6 implements /S, and versions 7 through 10 use the compiled project gate. Add /S only when the exact artifact reports SupportsSilentInstallation as true.')
       }
     }
     'InstallAnywhere' {
@@ -301,11 +298,10 @@ function Get-WinGetInstallerFamilyTemplate {
     'Wise' {
       [pscustomobject]@{
         InstallerType       = 'exe'
-        Scope               = 'machine'
-        InstallModes        = @('interactive', 'silent', 'silentWithProgress')
-        InstallerSwitches   = [ordered]@{ Silent = '/quiet /norestart'; SilentWithProgress = '/passive /norestart'; InstallLocation = 'INSTALLDIR="<INSTALLPATH>"'; Log = '/log "<LOGPATH>"' }
+        InstallModes        = @()
+        InstallerSwitches   = [ordered]@{}
         ExpectedReturnCodes = @()
-        Notes               = @('These defaults apply to the Wise-for-Windows-Installer MSI wrapper parsed by Get-WiseInfo, not every Wise generation.', 'If VM validation proves the Wise wrapper propagates nested MSI exit codes, add the MSI mappings explicitly because the outer type is generic exe.', 'Use the nested MSI for ProductCode, UpgradeCode, install-location property, associations, scope evidence, and AppsAndFeaturesEntries.InstallerType.')
+        Notes               = @('Wise behavior is route-specific. Use Get-WiseInfo to distinguish direct Wise MSI wrappers, classic WiseScript installers, and WiseScript prerequisite wrappers.', 'Use a validated nested MSI for ProductCode, UpgradeCode, install-location property, associations, scope evidence, and AppsAndFeaturesEntries.InstallerType.', 'Do not add /S or MSI quiet switches to a WiseScript prerequisite wrapper unless VM validation proves that the nested installer also runs unattended.')
       }
     }
     'Chromium Setup' {
@@ -334,12 +330,8 @@ function Get-WinGetInstallerFamilyTemplate {
     'CreateInstall' {
       [pscustomobject]@{
         InstallerType       = 'exe'
-        Scope               = 'machine'
-        InstallModes        = @('interactive', 'silent')
-        InstallerSwitches   = [ordered]@{ Silent = '-silent'; SilentWithProgress = '-silent' }
         ExpectedReturnCodes = @()
-        UpgradeBehavior     = 'install'
-        Notes               = @('Accepted Novostrim.CreateInstall manifests use -silent, but custom CreateInstall projects may differ.', 'Verify package-specific ProductCode and visible ARP data in a VM.')
+        Notes               = @('CreateInstall scope, silent modes, and silent switches are compiled project settings. Use exact parser evidence instead of family defaults.', 'Verify package-specific ProductCode and visible ARP data in a VM when deterministic registry writes do not prove one visible uninstall key.')
       }
     }
     'InstallForge' {
@@ -491,6 +483,21 @@ function ConvertTo-WinGetSuggestedManifestFieldSet {
     $Value = Get-WinGetSuggestionPropertyValue -InputObject $InputObject -Name $Field
     if ($Field -ceq 'InstallerType') {
       $Value = ConvertTo-WinGetSuggestedInstallerType -InstallerType ([string]$Value)
+    } elseif ($Field -ceq 'AppsAndFeaturesEntries' -and $Value) {
+      # Parser evidence can carry richer ARP objects than the manifest schema.
+      # Project only authored ARP fields instead of leaking internal MSI flags,
+      # builder evidence, or compatibility aliases into a suggestion.
+      $ProjectedEntries = [Collections.Generic.List[object]]::new()
+      $EntrySchema = $InstallerSchema['properties']['AppsAndFeaturesEntries']['items']
+      foreach ($Entry in @($Value)) {
+        $ProjectedEntry = [ordered]@{}
+        foreach ($EntryField in $EntrySchema['properties'].Keys) {
+          $EntryValue = ConvertTo-WinGetSuggestionValue -Value (Get-WinGetSuggestionPropertyValue -InputObject $Entry -Name $EntryField)
+          if (Test-WinGetSuggestionValue -Value $EntryValue) { $ProjectedEntry[$EntryField] = $EntryValue }
+        }
+        if ($ProjectedEntry.Count -gt 0) { $ProjectedEntries.Add($ProjectedEntry) }
+      }
+      $Value = @($ProjectedEntries)
     }
     $Value = ConvertTo-WinGetSuggestionValue -Value $Value
     if (-not (Test-WinGetSuggestionValue -Value $Value)) { continue }
@@ -658,6 +665,30 @@ function Get-WinGetParserResultSuggestion {
     foreach ($Field in @('InstallModes', 'InstallerSwitches', 'InstallerSuccessCodes', 'ElevationRequirement', 'UpgradeBehavior')) {
       $Value = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name $Field
       if (Test-WinGetSuggestionValue -Value $Value) { $Fields[$Field] = Copy-WinGetManifestValue -Value $Value }
+    }
+  }
+
+  if ($Family -ceq 'Setup Factory' -and $Metadata) {
+    $SilentSupport = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name SupportsSilentInstallation
+    if ($null -eq $SilentSupport) {
+      $NextSteps.Add('The Setup Factory silent-mode project setting is unresolved for this artifact; do not add /S until unattended installation is validated in a VM.')
+    } elseif (-not [bool]$SilentSupport) {
+      $NextSteps.Add('This Setup Factory artifact is interactive-only because its generation predates silent mode or its compiled project disables the feature; do not add /S.')
+    }
+  }
+
+  if ($Family -ceq 'DeployMaster' -and $Metadata) {
+    # Family-only guidance describes locator-based DeployMaster media. Exact parser evidence must
+    # replace those defaults because classic 2.x runtimes are proven interactive-only and expose
+    # neither /silent nor /appfolder.
+    foreach ($Field in @('InstallModes', 'InstallerSwitches')) { $Fields.Remove($Field) }
+    $MetadataModes = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name InstallModes
+    if (Test-WinGetSuggestionValue -Value $MetadataModes) { $Fields['InstallModes'] = Copy-WinGetManifestValue -Value $MetadataModes }
+    $MetadataSwitches = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name InstallerSwitches
+    if (Test-WinGetSuggestionValue -Value $MetadataSwitches) { $Fields['InstallerSwitches'] = Copy-WinGetManifestValue -Value $MetadataSwitches }
+
+    if ([bool](Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name SupportsDualScope)) {
+      $NextSteps.Add('This DeployMaster artifact supports both user and machine installation. Do not create scope variants until an explicit current-user selector is validated for this runtime; elevation alone can change the selected scope.')
     }
   }
 

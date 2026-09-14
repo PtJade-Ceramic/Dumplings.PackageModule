@@ -10,14 +10,17 @@ namespace Dumplings.PaquetBuilder
 {
     public sealed class ClassicDecodeResult
     {
-        public ClassicDecodeResult(byte[] data, long bytesConsumed)
+        public ClassicDecodeResult(byte[] data, long bytesConsumed, int paddingBytes)
         {
             Data = data;
             BytesConsumed = bytesConsumed;
+            PaddingBytes = paddingBytes;
         }
 
         public byte[] Data { get; }
         public long BytesConsumed { get; }
+
+        public int PaddingBytes { get; }
     }
 
     public static class PaquetBuilderClassicDecoder
@@ -70,6 +73,16 @@ namespace Dumplings.PaquetBuilder
             long maximumCompressedBytes,
             int expectedLength)
         {
+            return Decode(source, offset, maximumCompressedBytes, expectedLength, 0);
+        }
+
+        public static ClassicDecodeResult Decode(
+            Stream source,
+            long offset,
+            long maximumCompressedBytes,
+            int expectedLength,
+            int maximumZeroPaddingBytes)
+        {
             if (source == null)
             {
                 throw new ArgumentNullException(nameof(source));
@@ -80,7 +93,7 @@ namespace Dumplings.PaquetBuilder
                 throw new ArgumentException("The Paquet Builder source stream must be readable and seekable.", nameof(source));
             }
 
-            if (offset < 0 || maximumCompressedBytes <= 0 || expectedLength < 0)
+            if (offset < 0 || maximumCompressedBytes <= 0 || expectedLength < 0 || maximumZeroPaddingBytes < 0)
             {
                 throw new ArgumentOutOfRangeException(nameof(offset), "Paquet Builder decode bounds must be non-negative and non-empty.");
             }
@@ -94,7 +107,7 @@ namespace Dumplings.PaquetBuilder
             try
             {
                 source.Position = offset;
-                var input = new BitInput(source, maximumCompressedBytes);
+                var input = new BitInput(source, maximumCompressedBytes, maximumZeroPaddingBytes);
                 var output = new byte[expectedLength];
                 var ring = new byte[WindowSize];
                 Array.Fill(ring, (byte)0x20, 0, WindowSize - LookAheadSize);
@@ -134,7 +147,7 @@ namespace Dumplings.PaquetBuilder
                     }
                 }
 
-                return new ClassicDecodeResult(output, input.BytesConsumed);
+                return new ClassicDecodeResult(output, input.BytesConsumed, input.PaddingBytes);
             }
             finally
             {
@@ -326,16 +339,20 @@ namespace Dumplings.PaquetBuilder
         {
             private readonly Stream source;
             private readonly long maximumBytes;
+            private readonly int maximumZeroPaddingBytes;
             private ushort buffer;
             private int availableBits;
 
-            public BitInput(Stream source, long maximumBytes)
+            public BitInput(Stream source, long maximumBytes, int maximumZeroPaddingBytes)
             {
                 this.source = source;
                 this.maximumBytes = maximumBytes;
+                this.maximumZeroPaddingBytes = maximumZeroPaddingBytes;
             }
 
             public long BytesConsumed { get; private set; }
+
+            public int PaddingBytes { get; private set; }
 
             public int ReadBit()
             {
@@ -359,20 +376,33 @@ namespace Dumplings.PaquetBuilder
             {
                 while (availableBits <= 8)
                 {
+                    int value;
                     if (BytesConsumed >= maximumBytes)
                     {
-                        throw new EndOfStreamException("The Paquet Builder GPacker stream ended before the declared output was decoded.");
-                    }
+                        if (PaddingBytes >= maximumZeroPaddingBytes)
+                        {
+                            throw new EndOfStreamException("The Paquet Builder GPacker stream ended before the declared output was decoded.");
+                        }
 
-                    int value = source.ReadByte();
-                    if (value < 0)
+                        // The 2.7 memory-stream callback returns a zero byte at EOF. Keep
+                        // that historical behavior explicit and tightly bounded instead
+                        // of allowing an unterminated malformed stream to decode forever.
+                        PaddingBytes++;
+                        value = 0;
+                    }
+                    else
                     {
-                        throw new EndOfStreamException("The Paquet Builder GPacker stream is truncated.");
+                        value = source.ReadByte();
+                        if (value < 0)
+                        {
+                            throw new EndOfStreamException("The Paquet Builder GPacker stream is truncated.");
+                        }
+
+                        BytesConsumed++;
                     }
 
                     buffer |= (ushort)(value << (8 - availableBits));
                     availableBits += 8;
-                    BytesConsumed++;
                 }
             }
         }

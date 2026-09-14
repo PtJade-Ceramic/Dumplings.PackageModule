@@ -375,6 +375,7 @@ Describe 'dotNetInstaller official release media' {
     $Info.ExecutedPayloads | Should -Contain 'Simple\Simple.msi'
     $Info.ProductCode | Should -Be '{89DD6045-A45B-4ED4-9C06-E93316D52A1D}'
     $Info.NestedInstallerInfos[0].CabinetKey | Should -Be 'SIMPLE'
+    $Info.UnresolvedFields | Should -BeNullOrEmpty
   }
 
   It 'Extracts the configured duplicate-basename payload from its exact path' {
@@ -454,6 +455,7 @@ Describe 'dotNetInstaller official release media' {
     $Info.UpgradeCode | Should -Be '{CA3262B1-A5FA-4AC8-A3F0-72873B23C30C}'
     $Info.DisplayVersion | Should -Be '9.10.8166.500'
     $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
+    $Info.UnresolvedFields | Should -BeNullOrEmpty
     $Info.Diagnostics.Id | Should -Contain 'DotNetInstaller.Installability.SilentRouteUnproven'
   }
 }
