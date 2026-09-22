@@ -4,6 +4,11 @@
 
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
+# Import into this module's scope so direct Text.psm1 callers have the same bounded-stream
+# implementation as PackageModule callers, without exposing its internal dependencies globally.
+Import-Module (Join-Path $PSScriptRoot '..\Infrastructure\Runtime.psm1') -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot '..\Infrastructure\Binary.psm1') -ErrorAction Stop
+
 function Get-BomlessUnicodeTextEncoding {
   <#
   .SYNOPSIS
@@ -79,6 +84,64 @@ function Get-BomlessUnicodeTextEncoding {
   }
 }
 
+function Read-BoundedTextStream {
+  <#
+  .SYNOPSIS
+    Decode bounded text without taking ownership of the stream.
+  .PARAMETER Stream
+    Caller-owned readable seekable stream. Reads from its current position to EOF and restores
+    that position, including after encoding or size failures.
+  .PARAMETER MaximumBytes
+    Maximum remaining stream length in bytes.
+  .PARAMETER FallbackEncoding
+    Legacy encoding used if strict UTF-8 decoding fails.
+  .PARAMETER DetectBomlessUnicode
+    Infer BOM-less UTF-16 before attempting UTF-8. BOM detection is always enabled.
+  .PARAMETER AllowUnicodeFallback
+    Permit the legacy fallback after malformed inferred Unicode, for formats whose runtime does
+    so. By default an inferred Unicode decoding failure is terminal.
+  .OUTPUTS
+    One decoded string, including an empty string for empty input.
+  #>
+  [OutputType([string])]
+  [CmdletBinding()]
+  param (
+    [Parameter(Mandatory)][IO.Stream]$Stream,
+    [Parameter(Mandatory)][ValidateRange(0, [int]::MaxValue)][long]$MaximumBytes,
+    [string]$FallbackEncoding = 'Default',
+    [switch]$DetectBomlessUnicode,
+    [switch]$AllowUnicodeFallback
+  )
+
+  if (-not $Stream.CanRead -or -not $Stream.CanSeek) { throw 'Text decoding requires a readable seekable stream.' }
+  $OriginalPosition = $Stream.Position
+  $Range = $null
+  try {
+    $Length = $Stream.Length - $OriginalPosition
+    if ($Length -gt $MaximumBytes) { throw "The text stream exceeds the configured $MaximumBytes-byte limit." }
+    # A fixed view also bounds a growing file and makes BOM-less detection relative to the
+    # requested text, not a preceding binary header. The caller retains the underlying stream.
+    Import-InstallerInfrastructure
+    $Range = New-BoundedReadStream -Stream $Stream -Offset $OriginalPosition -Length $Length -LeaveOpen
+    $InferredEncoding = if ($DetectBomlessUnicode) { Get-BomlessUnicodeTextEncoding -Stream $Range }
+    $Encoding = if ($InferredEncoding) { $InferredEncoding } else { [Text.UTF8Encoding]::new($false, $true) }
+    $Reader = [IO.StreamReader]::new($Range, $Encoding, $true, 4096, $true)
+    try {
+      return $Reader.ReadToEnd()
+    } catch [Text.DecoderFallbackException] {
+      if ($InferredEncoding -and -not $AllowUnicodeFallback) { throw }
+    } finally { $Reader.Dispose() }
+
+    $Range.Position = 0
+    $Encoding = if ($FallbackEncoding -eq 'Default') { [Text.Encoding]::Default } else { [Text.Encoding]::GetEncoding($FallbackEncoding) }
+    $Reader = [IO.StreamReader]::new($Range, $Encoding, $true, 4096, $true)
+    try { return $Reader.ReadToEnd() } finally { $Reader.Dispose() }
+  } finally {
+    if ($Range) { $Range.Dispose() }
+    $Stream.Position = $OriginalPosition
+  }
+}
+
 function Read-BoundedTextFile {
   <#
   .SYNOPSIS
@@ -125,38 +188,7 @@ function Read-BoundedTextFile {
       throw "The text file is too large to decode as one bounded document: $ResolvedPath"
     }
 
-    $InferredUnicodeEncoding = Get-BomlessUnicodeTextEncoding -Stream $InputStream
-    $PrimaryEncoding = if ($InferredUnicodeEncoding) {
-      $InferredUnicodeEncoding
-    } else {
-      # Strict UTF-8 allows legacy ANSI input to reach the explicit fallback
-      # instead of silently replacing invalid byte sequences.
-      [Text.UTF8Encoding]::new($false, $true)
-    }
-
-    $Reader = [IO.StreamReader]::new($InputStream, $PrimaryEncoding, $true, 4096, $true)
-    try {
-      return $Reader.ReadToEnd()
-    } catch [Text.DecoderFallbackException] {
-      # A structurally inferred UTF-16 document is malformed rather than ANSI;
-      # preserve the strict failure instead of decoding it through a fallback.
-      if ($InferredUnicodeEncoding) { throw }
-    } finally {
-      $Reader.Dispose()
-    }
-
-    $InputStream.Position = 0
-    $LegacyEncoding = if ($FallbackEncoding -eq 'Default') {
-      [Text.Encoding]::Default
-    } else {
-      [Text.Encoding]::GetEncoding($FallbackEncoding)
-    }
-    $Reader = [IO.StreamReader]::new($InputStream, $LegacyEncoding, $true, 4096, $true)
-    try {
-      return $Reader.ReadToEnd()
-    } finally {
-      $Reader.Dispose()
-    }
+    return Read-BoundedTextStream -Stream $InputStream -MaximumBytes ([Math]::Min($MaximumBytes, [int]::MaxValue)) -FallbackEncoding $FallbackEncoding -DetectBomlessUnicode
   } finally {
     $InputStream.Dispose()
   }
@@ -369,4 +401,4 @@ function ConvertTo-UnorderedList {
   }
 }
 
-Export-ModuleMember -Function Get-BomlessUnicodeTextEncoding, Read-BoundedTextFile, ConvertFrom-Base64, ConvertTo-UnescapedUri, ConvertTo-Https, ConvertTo-MarkdownEscapedText, Split-LineEndings, Convert-LineEndings, ConvertTo-OrderedList, ConvertTo-UnorderedList
+Export-ModuleMember -Function Get-BomlessUnicodeTextEncoding, Read-BoundedTextStream, Read-BoundedTextFile, ConvertFrom-Base64, ConvertTo-UnescapedUri, ConvertTo-Https, ConvertTo-MarkdownEscapedText, Split-LineEndings, Convert-LineEndings, ConvertTo-OrderedList, ConvertTo-UnorderedList

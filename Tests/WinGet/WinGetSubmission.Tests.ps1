@@ -43,7 +43,7 @@ BeforeAll {
   }
 }
 
-Describe 'Get-WinGetPullRequestConflictInfo' {
+Describe 'Get-WinGetPullRequestConflictInfo' -Tag Unit {
   It 'excludes the token owner and blocks every other author by default' {
     $PullRequests = @(
       Get-TestPullRequest -Author 'DumplingsBot' -Number 1
@@ -96,7 +96,7 @@ Describe 'Get-WinGetPullRequestConflictInfo' {
   }
 }
 
-Describe 'Test-WinGetInstallerUrlIntersection' {
+Describe 'Test-WinGetInstallerUrlIntersection' -Tag Unit {
   It 'does not report an unchanged URL when every ordered-dictionary URL changed' {
     $OldInstallers = @(
       [ordered]@{ Architecture = 'x86'; InstallerUrl = 'https://old.example/setup-x86.exe' }
@@ -144,7 +144,7 @@ Describe 'Test-WinGetInstallerUrlIntersection' {
   }
 }
 
-Describe 'Invoke-WinGetSubmissionManifestRemoval' {
+Describe 'Invoke-WinGetSubmissionManifestRemoval' -Tag Unit {
   BeforeEach {
     $Script:RemovalLogs = [System.Collections.Generic.List[object]]::new()
     $Script:RemovalTask = [pscustomobject]@{}
@@ -197,7 +197,7 @@ Describe 'Invoke-WinGetSubmissionManifestRemoval' {
   }
 }
 
-Describe 'Test-WinGetGitHubFileChangeEquality' {
+Describe 'Test-WinGetGitHubFileChangeEquality' -Tag Unit {
   It 'matches the same exact changes regardless of API result order' {
     $Reference = @(
       Get-TestFileChange -FileName 'manifests/a.yaml' -Status added -Sha ('a' * 40)
@@ -238,7 +238,7 @@ Describe 'Test-WinGetGitHubFileChangeEquality' {
   }
 }
 
-Describe 'Get-WinGetSubmissionCandidateChange' {
+Describe 'Get-WinGetSubmissionCandidateChange' -Tag Unit {
   It 'returns the comparison files once the compare endpoint catches up' {
     $Script:CompareAttempts = 0
     Mock Get-WinGetGitHubComparison -ModuleName WinGetSubmission {
@@ -279,7 +279,7 @@ Describe 'Get-WinGetSubmissionCandidateChange' {
   }
 }
 
-Describe 'Select-WinGetPullRequestForClosure' {
+Describe 'Select-WinGetPullRequestForClosure' -Tag Unit {
   It 'excludes already handled pull requests and removes duplicate API results' {
     $PullRequests = @(
       Get-TestPullRequest -Author DumplingsBot -Number 10

@@ -32,7 +32,7 @@ BeforeAll {
   }
 }
 
-Describe 'WinGet logical manifest model' {
+Describe 'WinGet logical manifest model' -Tag Unit {
   It 'normalizes singleton input to multi-file documents with effective authored values' {
     $Model = ConvertFrom-WinGetManifestYaml -Content (ConvertTo-Yaml (New-TestWinGetSingleton))
     $Documents = ConvertTo-WinGetManifestDocumentSet -Manifest $Model

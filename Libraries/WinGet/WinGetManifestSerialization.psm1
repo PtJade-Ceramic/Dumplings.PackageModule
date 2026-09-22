@@ -237,14 +237,14 @@ function ConvertTo-WinGetManifestModelFromDocumentSet {
 
   $Defaults = [ordered]@{}
   foreach ($Key in $InstallerKeys) {
-    if ($Installer.Contains($Key)) { $Defaults[$Key] = Copy-WinGetManifestValue -Value $Installer[$Key] }
+    if ($Installer.Contains($Key)) { $Defaults[$Key] = Copy-Object -Value $Installer[$Key] }
   }
   $EffectiveInstallers = @(Get-WinGetAuthoredEffectiveInstallers -InstallerDefaults $Defaults -Installers ([System.Collections.IDictionary[]]@($Installer['Installers'])) -ManifestVersion $ManifestVersion)
 
   $DefaultLocalization = [ordered]@{}
   foreach ($Key in $DefaultLocale.Keys) {
     if ($Key -cnotin $Script:WinGetDocumentIdentityFields -and $Key -cne 'Moniker') {
-      $DefaultLocalization[$Key] = Copy-WinGetManifestValue -Value $DefaultLocale[$Key]
+      $DefaultLocalization[$Key] = Copy-Object -Value $DefaultLocale[$Key]
     }
   }
   $Localizations = [System.Collections.Generic.List[object]]::new()
@@ -252,7 +252,7 @@ function ConvertTo-WinGetManifestModelFromDocumentSet {
     $Localization = [ordered]@{}
     foreach ($Key in $Document.TypedData.Keys) {
       if ($Key -cnotin $Script:WinGetDocumentIdentityFields) {
-        $Localization[$Key] = Copy-WinGetManifestValue -Value $Document.TypedData[$Key]
+        $Localization[$Key] = Copy-Object -Value $Document.TypedData[$Key]
       }
     }
     $Localizations.Add($Localization)
@@ -343,7 +343,7 @@ function Format-WinGetManifest {
     if (-not $Manifest.Contains('ManifestType') -or [string]::IsNullOrWhiteSpace([string]$Manifest['ManifestType'])) {
       throw 'The manifest does not contain a ManifestType'
     }
-    $Formatted = Copy-WinGetManifestValue -Value $Manifest
+    $Formatted = Copy-Object -Value $Manifest
     $ManifestType = ([string]$Formatted['ManifestType']).ToLowerInvariant()
     $ManifestVersion = [string]$Formatted['ManifestVersion']
     if ([string]::IsNullOrWhiteSpace($ManifestVersion)) { $ManifestVersion = $Script:WinGetAuthoringManifestVersion }
@@ -355,7 +355,7 @@ function Format-WinGetManifest {
       $InstallerKeys = Get-WinGetInstallerPropertyCatalog -ManifestVersion $ManifestVersion
       $Defaults = [ordered]@{}
       foreach ($Key in $InstallerKeys) {
-        if ($Formatted.Contains($Key)) { $Defaults[$Key] = Copy-WinGetManifestValue -Value $Formatted[$Key] }
+        if ($Formatted.Contains($Key)) { $Defaults[$Key] = Copy-Object -Value $Formatted[$Key] }
       }
       # Formatting must preserve even semantically invalid authored fields so
       # validation can report them afterward. Apply only generic precedence
@@ -416,7 +416,7 @@ function ConvertTo-WinGetManifestDocumentSet {
       PackageIdentifier = [string]$Manifest.PackageIdentifier
       PackageVersion    = [string]$Manifest.PackageVersion
     }
-    foreach ($Key in $Manifest.DefaultLocalization.Keys) { $DefaultLocale[$Key] = Copy-WinGetManifestValue -Value $Manifest.DefaultLocalization[$Key] }
+    foreach ($Key in $Manifest.DefaultLocalization.Keys) { $DefaultLocale[$Key] = Copy-Object -Value $Manifest.DefaultLocalization[$Key] }
     if (-not [string]::IsNullOrEmpty([string]$Manifest.Moniker)) { $DefaultLocale['Moniker'] = [string]$Manifest.Moniker }
     $DefaultLocale['ManifestType'] = 'defaultLocale'
     $DefaultLocale['ManifestVersion'] = [string]$Manifest.ManifestVersion
@@ -427,7 +427,7 @@ function ConvertTo-WinGetManifestDocumentSet {
         PackageIdentifier = [string]$Manifest.PackageIdentifier
         PackageVersion    = [string]$Manifest.PackageVersion
       }
-      foreach ($Key in $Localization.Keys) { $Locale[$Key] = Copy-WinGetManifestValue -Value $Localization[$Key] }
+      foreach ($Key in $Localization.Keys) { $Locale[$Key] = Copy-Object -Value $Localization[$Key] }
       $Locale['ManifestType'] = 'locale'
       $Locale['ManifestVersion'] = [string]$Manifest.ManifestVersion
       $Locales.Add((Format-WinGetManifest -Manifest $Locale))

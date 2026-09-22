@@ -668,21 +668,7 @@ function ConvertFrom-DotNetInstallerConfiguration {
     [ValidateRange(0, 10)][int]$ReferenceDepth = 0
   )
 
-  $Settings = [Xml.XmlReaderSettings]::new()
-  $Settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
-  $Settings.XmlResolver = $null
-  $Settings.MaxCharactersInDocument = 16777216
-  $Settings.MaxCharactersFromEntities = 0
-  $StringReader = [IO.StringReader]::new($Content)
-  $Reader = [Xml.XmlReader]::Create($StringReader, $Settings)
-  $Document = [Xml.XmlDocument]::new()
-  try {
-    $Document.XmlResolver = $null
-    $Document.Load($Reader)
-  } finally {
-    $Reader.Dispose()
-    $StringReader.Dispose()
-  }
+  $Document = Read-BoundedXmlDocument -Content $Content -MaximumCharacters 16777216
   if (-not $Document.DocumentElement -or $Document.DocumentElement.LocalName -cne 'configurations') {
     throw 'The XML root is not a dotNetInstaller configurations document.'
   }

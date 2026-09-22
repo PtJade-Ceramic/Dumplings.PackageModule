@@ -2,7 +2,7 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-Describe 'PackageModule manifest-backed loading' {
+Describe 'PackageModule manifest-backed loading' -Tag Unit {
   BeforeAll {
     $Script:DumplingsTestRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
     $Script:DumplingsModuleRoot = [IO.Path]::GetFullPath((Join-Path $Script:DumplingsTestRoot '..'))
@@ -58,6 +58,16 @@ Describe 'PackageModule manifest-backed loading' {
     { Import-Module $Script:ManifestPath -Force -Global -ErrorAction Stop } | Should -Not -Throw
   }
 
+  It 'reuses implementation instances unless an explicit reload is requested' {
+    $Before = Get-Module Conversion
+    Import-Module $Script:ManifestPath -Force -Global -ErrorAction Stop
+    [object]::ReferenceEquals($Before, (Get-Module Conversion)) | Should -BeTrue
+    Import-Module $Script:ManifestPath -Force -ArgumentList $true -Global -ErrorAction Stop
+    [object]::ReferenceEquals($Before, (Get-Module Conversion)) | Should -BeFalse
+    (Get-Command 'Conversion\Copy-Object').ModuleName | Should -Be 'Conversion'
+    { Get-Help Copy-Object -Full -ErrorAction Stop } | Should -Not -Throw
+  }
+
   It 'supports wildcard command discovery and function-name completion' {
     { Get-Command -Name 'Get-WinGetMan*' -ErrorAction Stop } | Should -Not -Throw
     $Completion = [System.Management.Automation.CommandCompletion]::CompleteInput('Get-WinGetMan', 13, $null)
@@ -79,6 +89,8 @@ Describe 'PackageModule manifest-backed loading' {
     @(Get-Command Get-InnoInfo -All) | Should -HaveCount 1
     (Get-Command Get-InnoInfo).ModuleName | Should -Be 'Inno'
     (Get-Command 'Inno\Get-InnoInfo').ModuleName | Should -Be 'Inno'
+    (Get-Module Matrix).ExportedCommands.Keys | Should -Not -Contain 'Test-RetryDelayBudget'
+    (Get-Command Test-RetryDelayBudget).ModuleName | Should -Be 'Web'
   }
 
   It 'retains the default manifest schema version after global parent-module imports' {
@@ -127,7 +139,7 @@ Describe 'PackageModule manifest-backed loading' {
   }
 }
 
-Describe 'Provider-neutral installer analysis projection' {
+Describe 'Provider-neutral installer analysis projection' -Tag Unit {
   BeforeAll {
     $Script:DumplingsTestRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
     $Script:DumplingsModuleRoot = [IO.Path]::GetFullPath((Join-Path $Script:DumplingsTestRoot '..'))

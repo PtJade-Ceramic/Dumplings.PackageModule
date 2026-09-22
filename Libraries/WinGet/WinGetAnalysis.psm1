@@ -573,7 +573,7 @@ function Get-WinGetInstallerFamilySuggestion {
       $VariantSwitches = [ordered]@{}
       $CommonSwitches = Get-WinGetSuggestionPropertyValue -InputObject $ManifestFields -Name InstallerSwitches
       if ($CommonSwitches -is [System.Collections.IDictionary]) {
-        foreach ($Key in $CommonSwitches.Keys) { $VariantSwitches[$Key] = Copy-WinGetManifestValue -Value $CommonSwitches[$Key] }
+        foreach ($Key in $CommonSwitches.Keys) { $VariantSwitches[$Key] = Copy-Object -Value $CommonSwitches[$Key] }
       }
       $VariantSwitches['Custom'] = [string]$CustomSwitch
       $VariantFields['InstallerSwitches'] = $VariantSwitches
@@ -639,13 +639,13 @@ function Get-WinGetParserResultSuggestion {
   foreach ($Field in @('PackageFamilyName', 'SignatureSha256', 'MinimumOSVersion')) {
     foreach ($Source in $Sources) {
       $Value = Get-WinGetSuggestionPropertyValue -InputObject $Source -Name $Field
-      if (Test-WinGetSuggestionValue -Value $Value) { $Fields[$Field] = Copy-WinGetManifestValue -Value $Value; break }
+      if (Test-WinGetSuggestionValue -Value $Value) { $Fields[$Field] = Copy-Object -Value $Value; break }
     }
   }
   foreach ($Field in @('Platform', 'Capabilities', 'RestrictedCapabilities', 'Protocols', 'FileExtensions', 'Dependencies', 'AppsAndFeaturesEntries')) {
     foreach ($Source in $Sources) {
       $Value = Get-WinGetSuggestionPropertyValue -InputObject $Source -Name $Field
-      if (Test-WinGetSuggestionValue -Value $Value) { $Fields[$Field] = Copy-WinGetManifestValue -Value $Value; break }
+      if (Test-WinGetSuggestionValue -Value $Value) { $Fields[$Field] = Copy-Object -Value $Value; break }
     }
   }
   foreach ($Source in $Sources) {
@@ -664,7 +664,7 @@ function Get-WinGetParserResultSuggestion {
   if ($TemplateFamily -cin $GenericBehaviorFamilies -and $Metadata) {
     foreach ($Field in @('InstallModes', 'InstallerSwitches', 'InstallerSuccessCodes', 'ElevationRequirement', 'UpgradeBehavior')) {
       $Value = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name $Field
-      if (Test-WinGetSuggestionValue -Value $Value) { $Fields[$Field] = Copy-WinGetManifestValue -Value $Value }
+      if (Test-WinGetSuggestionValue -Value $Value) { $Fields[$Field] = Copy-Object -Value $Value }
     }
   }
 
@@ -683,9 +683,9 @@ function Get-WinGetParserResultSuggestion {
     # neither /silent nor /appfolder.
     foreach ($Field in @('InstallModes', 'InstallerSwitches')) { $Fields.Remove($Field) }
     $MetadataModes = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name InstallModes
-    if (Test-WinGetSuggestionValue -Value $MetadataModes) { $Fields['InstallModes'] = Copy-WinGetManifestValue -Value $MetadataModes }
+    if (Test-WinGetSuggestionValue -Value $MetadataModes) { $Fields['InstallModes'] = Copy-Object -Value $MetadataModes }
     $MetadataSwitches = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name InstallerSwitches
-    if (Test-WinGetSuggestionValue -Value $MetadataSwitches) { $Fields['InstallerSwitches'] = Copy-WinGetManifestValue -Value $MetadataSwitches }
+    if (Test-WinGetSuggestionValue -Value $MetadataSwitches) { $Fields['InstallerSwitches'] = Copy-Object -Value $MetadataSwitches }
 
     if ([bool](Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name SupportsDualScope)) {
       $NextSteps.Add('This DeployMaster artifact supports both user and machine installation. Do not create scope variants until an explicit current-user selector is validated for this runtime; elevation alone can change the selected scope.')
@@ -702,11 +702,11 @@ function Get-WinGetParserResultSuggestion {
     $MetadataProductCode = [string](Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name ProductCode)
     if (-not [string]::IsNullOrWhiteSpace($MetadataProductCode)) { $Fields['ProductCode'] = $MetadataProductCode }
     $MetadataModes = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name InstallModes
-    if (Test-WinGetSuggestionValue -Value $MetadataModes) { $Fields['InstallModes'] = Copy-WinGetManifestValue -Value $MetadataModes }
+    if (Test-WinGetSuggestionValue -Value $MetadataModes) { $Fields['InstallModes'] = Copy-Object -Value $MetadataModes }
     $MetadataSwitches = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name InstallerSwitches
-    if (Test-WinGetSuggestionValue -Value $MetadataSwitches) { $Fields['InstallerSwitches'] = Copy-WinGetManifestValue -Value $MetadataSwitches }
+    if (Test-WinGetSuggestionValue -Value $MetadataSwitches) { $Fields['InstallerSwitches'] = Copy-Object -Value $MetadataSwitches }
     $MetadataArp = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name AppsAndFeaturesEntries
-    if (Test-WinGetSuggestionValue -Value $MetadataArp) { $Fields['AppsAndFeaturesEntries'] = Copy-WinGetManifestValue -Value $MetadataArp }
+    if (Test-WinGetSuggestionValue -Value $MetadataArp) { $Fields['AppsAndFeaturesEntries'] = Copy-Object -Value $MetadataArp }
     if ([string]::IsNullOrWhiteSpace([string](Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name AppUri))) { $Fields.Remove('UpgradeBehavior') }
   }
 
@@ -737,7 +737,7 @@ function Get-WinGetParserResultSuggestion {
       foreach ($Key in $Switches.Keys) {
         if ($Key -ceq 'Silent' -and $NestedModes -notcontains 'silent') { continue }
         if ($Key -ceq 'SilentWithProgress' -and $NestedModes -notcontains 'silentWithProgress') { continue }
-        $FilteredSwitches[$Key] = Copy-WinGetManifestValue -Value $Switches[$Key]
+        $FilteredSwitches[$Key] = Copy-Object -Value $Switches[$Key]
       }
       if ($FilteredSwitches.Count -gt 0) { $Fields['InstallerSwitches'] = $FilteredSwitches } else { $Fields.Remove('InstallerSwitches') }
     }
@@ -768,9 +768,9 @@ function Get-WinGetParserResultSuggestion {
     $SupportsSilentInstallation = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name SupportsSilentInstallation
     if ($SupportsSilentInstallation -eq $true) {
       $Fields['InstallModes'] = @('interactive', 'silent')
-      $Fields['InstallerSwitches'] = Copy-WinGetManifestValue -Value (Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name InstallerSwitches)
+      $Fields['InstallerSwitches'] = Copy-Object -Value (Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name InstallerSwitches)
       $SuccessCodes = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name InstallerSuccessCodes
-      if (Test-WinGetSuggestionValue -Value $SuccessCodes) { $Fields['InstallerSuccessCodes'] = Copy-WinGetManifestValue -Value $SuccessCodes }
+      if (Test-WinGetSuggestionValue -Value $SuccessCodes) { $Fields['InstallerSuccessCodes'] = Copy-Object -Value $SuccessCodes }
     } elseif ($SupportsSilentInstallation -eq $false) {
       $Fields['InstallModes'] = @('interactive')
       $Fields.Remove('InstallerSwitches')
@@ -838,7 +838,7 @@ function Get-WinGetParserResultSuggestion {
         $Switches = [ordered]@{}
         $CommonSwitches = Get-WinGetSuggestionPropertyValue -InputObject $Fields -Name InstallerSwitches
         if ($CommonSwitches -is [System.Collections.IDictionary]) {
-          foreach ($Key in $CommonSwitches.Keys) { $Switches[$Key] = Copy-WinGetManifestValue -Value $CommonSwitches[$Key] }
+          foreach ($Key in $CommonSwitches.Keys) { $Switches[$Key] = Copy-Object -Value $CommonSwitches[$Key] }
         }
         $ScopeInstallLocation = Get-WinGetSuggestionPropertyValue -InputObject $ScopeInstallLocationSwitches -Name ($Scope -eq 'user' ? 'User' : 'Machine')
         if (-not [string]::IsNullOrWhiteSpace([string]$ScopeInstallLocation)) { $Switches['InstallLocation'] = [string]$ScopeInstallLocation }
@@ -859,7 +859,7 @@ function Get-WinGetParserResultSuggestion {
         $Switches = [ordered]@{}
         $CommonSwitches = Get-WinGetSuggestionPropertyValue -InputObject $Fields -Name InstallerSwitches
         if ($CommonSwitches -is [System.Collections.IDictionary]) {
-          foreach ($Key in $CommonSwitches.Keys) { $Switches[$Key] = Copy-WinGetManifestValue -Value $CommonSwitches[$Key] }
+          foreach ($Key in $CommonSwitches.Keys) { $Switches[$Key] = Copy-Object -Value $CommonSwitches[$Key] }
         }
         $Switches['Custom'] = '--enterprise'
         $Override['InstallerSwitches'] = $Switches

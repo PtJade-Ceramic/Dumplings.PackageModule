@@ -210,10 +210,10 @@ function Get-WinGetEffectiveInstallers {
   $AuthoredModel = ConvertFrom-WinGetMergedManifest -Manifest $Manifest -SourceFormat Merged
   $Results = [System.Collections.Generic.List[object]]::new()
   foreach ($Entry in @($AuthoredModel.Installers)) {
-    $Effective = Copy-WinGetManifestValue -Value $Entry
+    $Effective = Copy-Object -Value $Entry
     $EffectiveType = Get-WinGetManifestEffectiveInstallerType -Installer $Effective
     if ($Script:WinGetDefaultSwitches.Contains($EffectiveType)) {
-      $Switches = if ($Effective.Contains('InstallerSwitches')) { Copy-WinGetManifestValue $Effective.InstallerSwitches } else { [ordered]@{} }
+      $Switches = if ($Effective.Contains('InstallerSwitches')) { Copy-Object $Effective.InstallerSwitches } else { [ordered]@{} }
       foreach ($Key in $Script:WinGetDefaultSwitches[$EffectiveType].Keys) {
         if (-not $Switches.Contains($Key)) { $Switches[$Key] = $Script:WinGetDefaultSwitches[$EffectiveType][$Key] }
       }
@@ -225,7 +225,7 @@ function Get-WinGetEffectiveInstallers {
       foreach ($ReturnCode in @($Effective['InstallerSuccessCodes'])) { $null = $KnownReturnCodes.Add([long]$ReturnCode) }
       foreach ($ReturnCode in @($Effective['ExpectedReturnCodes'])) {
         if ($null -eq $ReturnCode) { continue }
-        $ExpectedReturnCodes.Add((Copy-WinGetManifestValue -Value $ReturnCode))
+        $ExpectedReturnCodes.Add((Copy-Object -Value $ReturnCode))
         $null = $KnownReturnCodes.Add([long]$ReturnCode['InstallerReturnCode'])
       }
       foreach ($DefaultReturnCode in $Script:WinGetDefaultReturnCodes[$EffectiveType].GetEnumerator()) {
@@ -260,12 +260,12 @@ function ConvertFrom-WinGetPreviewManifest {
     ManifestVersion   = '1.0.0'
   }
   foreach ($Key in @('Channel', 'Commands', 'Protocols', 'FileExtensions', 'PackageFamilyName', 'ProductCode')) {
-    if ($Manifest.Contains($Key)) { $Result[$Key] = Copy-WinGetManifestValue -Value $Manifest[$Key] }
+    if ($Manifest.Contains($Key)) { $Result[$Key] = Copy-Object -Value $Manifest[$Key] }
   }
   if ($Manifest.Contains('InstallerType')) { $Result['InstallerType'] = [string]$Manifest['InstallerType'] }
   if ($Manifest.Contains('UpdateBehavior')) { $Result['UpgradeBehavior'] = [string]$Manifest['UpdateBehavior'] }
   if ($Manifest.Contains('MinOSVersion')) { $Result['MinimumOSVersion'] = [string]$Manifest['MinOSVersion'] }
-  if ($Manifest.Contains('Switches')) { $Result['InstallerSwitches'] = Copy-WinGetManifestValue -Value $Manifest['Switches'] }
+  if ($Manifest.Contains('Switches')) { $Result['InstallerSwitches'] = Copy-Object -Value $Manifest['Switches'] }
 
   $Installers = [System.Collections.Generic.List[object]]::new()
   foreach ($PreviewInstaller in @($Manifest['Installers'])) {
@@ -278,7 +278,7 @@ function ConvertFrom-WinGetPreviewManifest {
         @('PackageFamilyName', 'PackageFamilyName'), @('ProductCode', 'ProductCode'), @('Switches', 'InstallerSwitches')
       )) {
       if ($PreviewInstaller.Contains($Mapping[0])) {
-        $Installer[$Mapping[1]] = Copy-WinGetManifestValue -Value $PreviewInstaller[$Mapping[0]]
+        $Installer[$Mapping[1]] = Copy-Object -Value $PreviewInstaller[$Mapping[0]]
       }
     }
     $Installers.Add($Installer)
@@ -291,7 +291,7 @@ function ConvertFrom-WinGetPreviewManifest {
     $Localization = [ordered]@{}
     if ($PreviewLocalization.Contains('Language')) { $Localization['PackageLocale'] = [string]$PreviewLocalization['Language'] }
     foreach ($Key in @('Description', 'Homepage', 'LicenseUrl')) {
-      if ($PreviewLocalization.Contains($Key)) { $Localization[$Key] = Copy-WinGetManifestValue -Value $PreviewLocalization[$Key] }
+      if ($PreviewLocalization.Contains($Key)) { $Localization[$Key] = Copy-Object -Value $PreviewLocalization[$Key] }
     }
     $Localizations.Add($Localization)
   }
@@ -514,21 +514,21 @@ function Merge-WinGetManifestValidationSet {
   #>
   param ([object[]]$Documents)
 
-  if ($Documents.Count -eq 1) { return Copy-WinGetManifestValue -Value $Documents[0].TypedData }
+  if ($Documents.Count -eq 1) { return Copy-Object -Value $Documents[0].TypedData }
 
   $InstallerDocument = $Documents | Where-Object ManifestType -CEQ installer | Select-Object -First 1
   $DefaultLocaleDocument = $Documents | Where-Object ManifestType -CEQ defaultLocale | Select-Object -First 1
-  $Merged = Copy-WinGetManifestValue -Value $InstallerDocument.TypedData
+  $Merged = Copy-Object -Value $InstallerDocument.TypedData
   $CommonFields = @('PackageIdentifier', 'PackageVersion', 'ManifestType', 'ManifestVersion')
   foreach ($Key in $DefaultLocaleDocument.TypedData.Keys) {
-    if ($Key -cnotin $CommonFields) { $Merged[$Key] = Copy-WinGetManifestValue -Value $DefaultLocaleDocument.TypedData[$Key] }
+    if ($Key -cnotin $CommonFields) { $Merged[$Key] = Copy-Object -Value $DefaultLocaleDocument.TypedData[$Key] }
   }
 
   $Localizations = [System.Collections.Generic.List[object]]::new()
   foreach ($Document in $Documents | Where-Object ManifestType -CEQ locale) {
     $Localization = [ordered]@{}
     foreach ($Key in $Document.TypedData.Keys) {
-      if ($Key -cnotin $CommonFields) { $Localization[$Key] = Copy-WinGetManifestValue -Value $Document.TypedData[$Key] }
+      if ($Key -cnotin $CommonFields) { $Localization[$Key] = Copy-Object -Value $Document.TypedData[$Key] }
     }
     $Localizations.Add($Localization)
   }

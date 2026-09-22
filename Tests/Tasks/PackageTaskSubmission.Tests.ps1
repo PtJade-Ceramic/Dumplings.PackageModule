@@ -56,7 +56,7 @@ BeforeAll {
   }
 }
 
-Describe 'PackageTask WinGet submission claims' {
+Describe 'PackageTask WinGet submission claims' -Tag Unit {
   BeforeEach {
     $Global:DumplingsPreference = [ordered]@{ EnableSubmit = $true }
     $Global:DumplingsStorage = [hashtable]::Synchronized(@{})
@@ -142,7 +142,7 @@ Describe 'PackageTask WinGet submission claims' {
   }
 }
 
-Describe 'PackageTask Check domain-change warning' {
+Describe 'PackageTask Check domain-change warning' -Tag Unit {
   BeforeEach {
     $Global:DumplingsPreference = [ordered]@{}
   }

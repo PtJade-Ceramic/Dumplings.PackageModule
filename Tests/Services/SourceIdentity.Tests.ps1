@@ -11,7 +11,7 @@ BeforeAll {
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Networking\SourceIdentity.psm1') -Force
 }
 
-Describe 'Get-InstallerSourceIdentity' {
+Describe 'Get-InstallerSourceIdentity' -Tag Unit {
   It 'extracts GitHub owner/repo identities' {
     Get-InstallerSourceIdentity -Uri 'https://github.com/example/repo/releases/download/v1/app.exe' | Should -Be 'github.com/example/repo'
   }

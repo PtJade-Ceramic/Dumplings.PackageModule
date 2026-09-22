@@ -416,6 +416,8 @@ function New-WinGetGitHubBranch {
     The source branch of the repository from which the new branch will be created
   .PARAMETER RepoRef
     The reference of the source branch from which the new branch will be created. Format: "refs/heads/branch" or "refs/tags/tag"
+  .PARAMETER SourceSha
+    Optional immutable source commit captured when reading reference manifests.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -428,16 +430,20 @@ function New-WinGetGitHubBranch {
     [Parameter(ParameterSetName = 'Branch', Mandatory, HelpMessage = 'The source branch of the repository from which the new branch will be created')]
     [string]$RepoBranch,
     [Parameter(ParameterSetName = 'Ref', Mandatory, HelpMessage = 'The reference of the source branch from which the new branch will be created. Format: "refs/heads/branch" or "refs/tags/tag"')]
-    [string]$RepoRef
+    [string]$RepoRef,
+    [ValidatePattern('^(?:[a-fA-F0-9]{40}|[a-fA-F0-9]{64})$')][string]$SourceSha
   )
 
   # Get the reference of the source branch
-  $SourceBranch = Get-WinGetGitHubBranch -RepoOwner $RepoOwner -RepoName $RepoName -RepoBranch $RepoBranch
+  if (-not $SourceSha) {
+    $SourceBranch = Get-WinGetGitHubBranch -RepoOwner $RepoOwner -RepoName $RepoName -RepoBranch $RepoBranch
+    $SourceSha = $SourceBranch.object.sha
+  }
 
   # Create the new branch
   $Response = Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/git/refs" -Method Post -Body @{
     ref = $PSCmdlet.ParameterSetName -eq 'Ref' ? $RepoRef : "refs/heads/${Name}"
-    sha = $SourceBranch.object.sha
+    sha = $SourceSha
   }
 
   return $Response

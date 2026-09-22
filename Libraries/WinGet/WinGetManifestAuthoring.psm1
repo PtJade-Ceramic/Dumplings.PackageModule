@@ -20,7 +20,7 @@ function ConvertTo-WinGetAuthoringDictionary {
   param ([Parameter(Mandatory)][object]$InputObject)
 
   if ($InputObject -is [System.Collections.IDictionary]) {
-    return Copy-WinGetManifestValue -Value $InputObject
+    return Copy-Object -Value $InputObject
   }
   $Result = [ordered]@{}
   foreach ($Property in $InputObject.PSObject.Properties) {
@@ -29,10 +29,10 @@ function ConvertTo-WinGetAuthoringDictionary {
       $Value = ConvertTo-WinGetAuthoringDictionary -InputObject $Value
     } elseif ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
       $Value = @($Value | ForEach-Object {
-          if ($_ -is [pscustomobject]) { ConvertTo-WinGetAuthoringDictionary -InputObject $_ } else { Copy-WinGetManifestValue -Value $_ }
+          if ($_ -is [pscustomobject]) { ConvertTo-WinGetAuthoringDictionary -InputObject $_ } else { Copy-Object -Value $_ }
         })
     }
-    $Result[$Property.Name] = Copy-WinGetManifestValue -Value $Value
+    $Result[$Property.Name] = Copy-Object -Value $Value
   }
   return $Result
 }
@@ -75,7 +75,7 @@ function Merge-WinGetAuthoringPatch {
     [Parameter(Mandatory)][System.Collections.IDictionary]$Patch
   )
 
-  $Result = Copy-WinGetManifestValue -Value $Target
+  $Result = Copy-Object -Value $Target
   foreach ($Key in $Patch.Keys) {
     $PatchValue = $Patch[$Key]
     if ($null -eq $PatchValue) {
@@ -86,7 +86,7 @@ function Merge-WinGetAuthoringPatch {
       $Result[$Key] = Merge-WinGetAuthoringPatch -Target $Result[$Key] -Patch $PatchValue
       continue
     }
-    $Result[$Key] = Copy-WinGetManifestValue -Value $PatchValue
+    $Result[$Key] = Copy-Object -Value $PatchValue
   }
   return $Result
 }
@@ -122,7 +122,7 @@ function Get-WinGetAuthoringInstallerIndex {
     $Candidate = $Installers[$CandidateIndex]
     $IsMatch = $true
     foreach ($Key in $Match.Keys) {
-      if (-not $Candidate.Contains($Key) -or -not (Test-WinGetManifestValueEqual -Left $Candidate[$Key] -Right $Match[$Key])) {
+      if (-not $Candidate.Contains($Key) -or -not (Test-ObjectValueEqual -Left $Candidate[$Key] -Right $Match[$Key])) {
         $IsMatch = $false
         break
       }
@@ -395,7 +395,7 @@ function Get-WinGetAuthoringAnalysisProjection {
       if ($null -eq $Value) { continue }
       if ($Value -is [string] -and [string]::IsNullOrWhiteSpace([string]$Value)) { continue }
       if ($Value -is [System.Collections.ICollection] -and $Value.Count -eq 0) { continue }
-      $ManifestFields[$Field] = if ($Value.GetType() -eq [pscustomobject]) { ConvertTo-WinGetAuthoringDictionary -InputObject $Value } else { Copy-WinGetManifestValue -Value $Value }
+      $ManifestFields[$Field] = if ($Value.GetType() -eq [pscustomobject]) { ConvertTo-WinGetAuthoringDictionary -InputObject $Value } else { Copy-Object -Value $Value }
     }
   }
 
@@ -403,7 +403,7 @@ function Get-WinGetAuthoringAnalysisProjection {
   # authoritative enough to author automatically.
   $Dependencies = Get-WinGetAuthoringPropertyValue -Source $Sources -Name Dependencies
   if ($Dependencies -is [System.Collections.IDictionary] -and $Dependencies.Count -gt 0) {
-    $ManifestFields['Dependencies'] = Copy-WinGetManifestValue -Value $Dependencies
+    $ManifestFields['Dependencies'] = Copy-Object -Value $Dependencies
   } elseif ($PortableEvidence -and @($PortableEvidence.RecommendedPackageDependencies).Count -gt 0) {
     $ManifestFields['Dependencies'] = [ordered]@{ PackageDependencies = @($PortableEvidence.RecommendedPackageDependencies | ForEach-Object { ConvertTo-WinGetAuthoringDictionary -InputObject $_ }) }
   }
@@ -661,7 +661,7 @@ function Get-WinGetInstallerManifestSuggestion {
       $AuthoringDiagnostics = [System.Collections.Generic.List[object]]::new([object[]]@($AuthoringDiagnostics | Where-Object Id -CNE 'WinGetAuthoring.Portable.RequiresExplicitType'))
     }
 
-    $Fields = Copy-WinGetManifestValue -Value $Projection.ManifestFields
+    $Fields = Copy-Object -Value $Projection.ManifestFields
     if ($PhysicalInstallerType -ceq 'zip') {
       $NestedType = $Fields['InstallerType']
       $Fields['InstallerType'] = 'zip'
@@ -683,7 +683,7 @@ function Get-WinGetInstallerManifestSuggestion {
 
     $Installers = [System.Collections.Generic.List[System.Collections.IDictionary]]::new()
     foreach ($ConcreteArchitecture in $Architectures) {
-      $Entry = Copy-WinGetManifestValue -Value $Fields
+      $Entry = Copy-Object -Value $Fields
       $Entry['Architecture'] = $ConcreteArchitecture
       $Entry = Merge-WinGetAuthoringPatch -Target $Entry -Patch (ConvertTo-WinGetAuthoringDictionary -InputObject $Override)
       if ($Entry.Contains('UnsupportedOSArchitectures')) {
@@ -1129,7 +1129,7 @@ function Set-WinGetAuthoringPointerValue {
       if (-not $Current.Contains($Leaf)) { throw "Property path '$Path' does not exist." }
       $Current.Remove($Leaf)
     } else {
-      $Current[$Leaf] = Copy-WinGetManifestValue -Value $Value
+      $Current[$Leaf] = Copy-Object -Value $Value
     }
     return
   }
@@ -1141,7 +1141,7 @@ function Set-WinGetAuthoringPointerValue {
     }
     if ($ArrayIndex -ge $Current.Count) { throw "Property path '$Path' has array index $ArrayIndex outside the current $($Current.Count)-item array." }
     if ($Remove) { throw "Property path '$Path' addresses an array element. Replace the parent array to add or remove array items." }
-    $Current[$ArrayIndex] = Copy-WinGetManifestValue -Value $Value
+    $Current[$ArrayIndex] = Copy-Object -Value $Value
     return
   }
 

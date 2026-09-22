@@ -4,7 +4,7 @@ BeforeDiscovery {
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Data\Text.psm1') -Force
 }
 
-Describe 'ConvertFrom-Base64' {
+Describe 'ConvertFrom-Base64' -Tag Unit {
   It 'decodes a line-wrapped payload that already contains padding' {
     ("SGVs`r`nbG8=" | ConvertFrom-Base64) | Should -Be 'Hello'
   }

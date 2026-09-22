@@ -247,7 +247,7 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
       }
 
       $X86Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $X86Installer -OldInstaller ($X86Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
-      $X64Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $X64Installer -OldInstaller ($X64Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -Installers @($X86Result) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+      $X64Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $X64Installer -OldInstaller ($X64Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
 
       $X86Result.ProductCode | Should -Be 'ARP.Product.x86'
       $X64Result.ProductCode | Should -Be 'ARP.Product.x64'
@@ -758,6 +758,8 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
       Mock Get-NSISInfo {
         param($Path)
         $Script:ParsedNestedPath = $Path
+        $Script:NestedExistedDuringParsing = Test-Path -LiteralPath $Path
+        $Script:UnrelatedExistedDuringParsing = Test-Path -LiteralPath (Join-Path (Split-Path (Split-Path $Path -Parent) -Parent) 'unrelated\large.bin')
         [pscustomobject]@{
           ProductCode                = 'Nested.NSIS.Product'
           DisplayName                = 'Nested NSIS Product'
@@ -780,7 +782,9 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
 
       try {
         $Result.ProductCode | Should -Be 'Nested.NSIS.Product'
-        Test-Path -LiteralPath $Script:ParsedNestedPath | Should -BeTrue
+        $Script:NestedExistedDuringParsing | Should -BeTrue
+        $Script:UnrelatedExistedDuringParsing | Should -BeFalse
+        Test-Path -LiteralPath $Script:ParsedNestedPath | Should -BeFalse
         $ExtractionRoot = Split-Path (Split-Path $Script:ParsedNestedPath -Parent) -Parent
         Join-Path $ExtractionRoot 'unrelated\large.bin' | Should -Not -Exist
       } finally {

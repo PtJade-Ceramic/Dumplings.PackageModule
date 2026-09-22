@@ -45,7 +45,45 @@ Use the [`use-dumplings-functions` skill](../../.agents/skills/use-dumplings-fun
 
 Package submissions are claimed by effective WinGet identifier in process-wide shared storage. The first task owns the claim for the run; duplicate tasks skip submission rather than racing the same package.
 
+`DumplingsTaskBase` owns common construction, invocation status and logging for `SimpleTask` and `PackageTask`. Package state comparison and submission remain in `PackageTask`. Markdown and Telegram notifications use one state walk with separate escaping and spacing. Identical state notifications are suppressed while the existing ticket remains usable; failed, cancelled or superseded tickets can be retried. Custom messages remain distinct.
+
+Normal imports reuse modules within a runspace. For development, dot-source `Index.ps1 -Reload` to reload the implementation modules explicitly. Direct imports use `Import-Module ./PackageModule.psd1 -Force -ArgumentList $true` for the same behavior. Commands keep their family module ownership; no forwarding proxies are generated.
+
+### Versionless Installer Tracking
+
+`PackageTask.CheckInstallerUpdates(options)` handles per-installer ETag, Last-Modified, Content-Length, custom checksum-header, or SHA256 checks. It downloads candidates, confirms hashes, and calls the required `ReadVersion(Path, Installer)` callback. It prepares `CurrentState` without writing files, messaging, or submitting. `CompleteInstallerUpdates(result)` applies the decision once through the existing task enablement gates. Existing `Check()` behavior is unchanged.
+
+```powershell
+$this.CurrentState.Installer += [ordered]@{ InstallerUrl = 'https://example.com/setup.msi' }
+$Result = $this.CheckInstallerUpdates(@{
+  Validator = 'ETag'
+  ReadVersion = { param($Path, $Installer) Read-ProductVersionFromMsi -Path $Path }
+})
+if ($Result.NeedsMetadata) {
+  # Retrieve optional release notes here.
+}
+$this.CompleteInstallerUpdates($Result)
+```
+
+Unchanged validators avoid downloads. Rotated validators with identical SHA256 refresh tracking only, preserving package metadata. Newer releases and same-version rebuilds use normal submission safeguards; rollbacks are rejected unless explicitly allowed. All architectures must resolve consistent versions. `Hash` always downloads; `Force` also reruns version readers. Date and length checks trust the endpoint and can miss byte changes with unchanged headers.
+
+State contains bounded, versioned `InstallerTracking` records, not HTTP responses, credentials, or temporary paths. Retained downloads and verified file identities feed manifest updating without a second hash pass; task disposal removes owned files only. `Installers` overrides provide stable keys and architecture-specific readers. Synchronous `Probe`/`Download` callbacks cover custom endpoints without introducing another task type or Core service.
+
+See the [versionless task reference](../../.agents/skills/author-dumplings-task/references/sources/versionless.md) for complete options, callback contracts, outcomes, legacy mappings, and migration examples.
+
+### Data API Migration
+
+Use `Copy-Object` instead of `Copy-WinGetManifestValue`, and `Test-ObjectValueEqual` instead of `Test-WinGetManifestValueEqual`. Both live in `Libraries/Data/Conversion.psm1`; the duplicate schema-local implementations have also been removed. Copying preserves explicit nulls, nested empty arrays, ordered dictionaries, dates and scriptblocks without a JSON round trip. It is a bounded data copier, not a clone facility for arbitrary mutable .NET resources. Equality is case-sensitive, ignores dictionary key ordering and preserves array ordering.
+
+Manifest updates own their downloads, hashes, extracted ZIP entries and parser results for one operation. Cache keys include file identity and all supplied parser options, including architecture, scope and command line. Reusing another installer's authored ARP fields by URL has been removed. Each entry applies cached parser facts to its own existing fields and diagnostic policy. Cleanup in `finally` removes operation-created files only; files supplied through `InstallerFiles` remain caller-owned. The internal metadata updater no longer accepts the obsolete `Installers` argument.
+
+Submission reads remote reference manifests at one captured commit and carries that revision into branch creation. Existing branch-head conflict, identical-PR and empty-change checks remain in place.
+
 ### Installer Analysis
+
+Large families use locally imported implementation modules. CreateInstall separates Gentee decoding, operation evidence, and GEA archives; DeployMaster separates classic and modern media; InstallBuilder separates project semantics from Metakit/CookFS payloads. Their original family modules retain public command ownership and result composition. Parsed programs, layouts, and catalogs flow through explicit parameters rather than mutable cross-module state.
+
+Shared mechanics stay in the existing infrastructure and data modules: `Import-InstallerManagedAssembly` also accepts a literal provider path, `Read-BinaryInteger` accepts either a stream or byte buffer, and the data modules provide bounded text/XML readers and first-present dictionary lookup. Family-specific encoding choices, record bounds, and failure recovery remain at the call site.
 
 `Get-InstallerAnalysis` detects file and installer families from structured content and magic bytes without applying package-provider policy or returning manifest suggestions. `Get-WinGetInstallerAnalysis` projects the same evidence into schema-valid `SuggestedManifestFields`, complete `SuggestedManifestVariants`, and separate `SuggestedNextSteps`. Generic EXE families keep their identity in `Family` and use `InstallerType: exe`; YAML family comments are not runtime values. `DetectedFamilies` contains only structurally confirmed or successfully parsed families, while `RoutingHints` and `RejectedCandidates` retain heuristic diagnostics without promoting them to detections. `FamilyCandidates` remains a confirmed-only compatibility projection.
 

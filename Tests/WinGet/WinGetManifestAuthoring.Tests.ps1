@@ -59,7 +59,7 @@ BeforeAll {
   }
 }
 
-Describe 'WinGet manifest model authoring' {
+Describe 'WinGet manifest model authoring' -Tag Unit {
   It 'creates a complete logical model and rejects incomplete output' {
     $Manifest = New-AuthoringTestModel
     $Manifest.PSTypeNames | Should -Contain 'Dumplings.WinGet.ManifestModel'
@@ -199,7 +199,7 @@ Describe 'WinGet manifest model authoring' {
   }
 }
 
-Describe 'Get-WinGetInstallerManifestSuggestion' {
+Describe 'Get-WinGetInstallerManifestSuggestion' -Tag Unit {
   BeforeEach {
     $Script:InstallerPath = Join-Path $TestDrive 'installer.bin'
     [IO.File]::WriteAllBytes($Script:InstallerPath, [byte[]](1, 2, 3, 4))
@@ -427,7 +427,7 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
   }
 }
 
-Describe 'Save-WinGetManifest and CLI' {
+Describe 'Save-WinGetManifest and CLI' -Tag Unit {
   It 'atomically writes, replaces stale locales, and reads the saved model' {
     $Path = Join-Path $TestDrive 'saved-manifests'
     $Manifest = New-AuthoringTestModel
@@ -470,7 +470,7 @@ Describe 'Save-WinGetManifest and CLI' {
     $Manifest = New-AuthoringTestModel
     $null = Save-WinGetManifest -Manifest $Manifest -Path $Path
     $InvalidInstaller = [ordered]@{}
-    foreach ($Key in $Manifest.Installers[0].Keys) { $InvalidInstaller[$Key] = Copy-WinGetManifestValue -Value $Manifest.Installers[0][$Key] }
+    foreach ($Key in $Manifest.Installers[0].Keys) { $InvalidInstaller[$Key] = Copy-Object -Value $Manifest.Installers[0][$Key] }
     $InvalidInstaller['InstallerSha256'] = 'invalid'
     $Invalid = New-WinGetManifestModel -PackageIdentifier $Manifest.PackageIdentifier -PackageVersion $Manifest.PackageVersion `
       -ManifestVersion $Manifest.ManifestVersion -InstallerDefaults ([ordered]@{}) -Installers @($InvalidInstaller) `

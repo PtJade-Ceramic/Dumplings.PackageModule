@@ -348,15 +348,7 @@ function Read-ZeroInstallApplicationSetting {
   param ([Parameter(Mandatory)][string]$Path)
 
   $Content = Read-BoundedTextFile -Path $Path -MaximumBytes $Script:ZeroInstallMaximumConfigBytes -FallbackEncoding utf-8
-  $Settings = [Xml.XmlReaderSettings]::new()
-  $Settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
-  $Settings.XmlResolver = $null
-  $Settings.MaxCharactersInDocument = $Script:ZeroInstallMaximumConfigBytes
-  $StringReader = [IO.StringReader]::new($Content)
-  $Reader = [Xml.XmlReader]::Create($StringReader, $Settings)
-  $Document = [Xml.XmlDocument]::new()
-  $Document.XmlResolver = $null
-  try { $Document.Load($Reader) } finally { $Reader.Dispose(); $StringReader.Dispose() }
+  $Document = Read-BoundedXmlDocument -Content $Content -MaximumCharacters $Script:ZeroInstallMaximumConfigBytes
 
   $Result = [ordered]@{}
   foreach ($Node in $Document.SelectNodes('/configuration/appSettings/add')) {
@@ -1113,15 +1105,7 @@ function ConvertFrom-ZeroInstallFeed {
 
     # Prohibit DTDs and external resolution so untrusted feed text cannot read
     # local files or expand external entities during static analysis.
-    $Settings = [Xml.XmlReaderSettings]::new()
-    $Settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
-    $Settings.XmlResolver = $null
-    $Settings.MaxCharactersInDocument = $Script:ZeroInstallMaximumFeedBytes
-    $StringReader = [IO.StringReader]::new($Content)
-    $XmlReader = [Xml.XmlReader]::Create($StringReader, $Settings)
-    $Document = [Xml.XmlDocument]::new()
-    $Document.XmlResolver = $null
-    try { $Document.Load($XmlReader) } finally { $XmlReader.Dispose(); $StringReader.Dispose() }
+    $Document = Read-BoundedXmlDocument -Content $Content -MaximumCharacters $Script:ZeroInstallMaximumFeedBytes
 
     $Root = $Document.DocumentElement
     if (-not $Root -or $Root.LocalName -cne 'interface' -or $Root.NamespaceURI -cne $Script:ZeroInstallFeedNamespace) { throw 'The XML is not a namespaced Zero Install interface feed.' }
@@ -2365,12 +2349,12 @@ function Expand-ZeroInstallImplementation {
   $OwnDestination = [string]::IsNullOrWhiteSpace($DestinationPath)
   if ($OwnDestination) { $DestinationPath = New-TempFolder } else { $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent }
   $Context = [pscustomobject]@{
-    Root            = $StagingPath
-    EntryCount      = 0
-    ExpandedBytes   = 0L
-    MaximumEntries  = $MaximumEntries
-    MaximumBytes    = $MaximumExpandedBytes
-    ExecutablePaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    Root                = $StagingPath
+    EntryCount          = 0
+    ExpandedBytes       = 0L
+    MaximumEntries      = $MaximumEntries
+    MaximumBytes        = $MaximumExpandedBytes
+    ExecutablePaths     = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     DirectoryTimestamps = [Collections.Generic.Dictionary[string, datetime]]::new([StringComparer]::OrdinalIgnoreCase)
   }
   try {

@@ -13,7 +13,16 @@ BeforeAll {
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\WinGet\WinGetGitHubRepo.psm1') -Force
 }
 
-Describe 'Add-WinGetGitHubManifests' {
+Describe 'Add-WinGetGitHubManifests' -Tag Unit {
+  It 'creates a branch from captured revision evidence without fetching a moving source branch' {
+    Mock Get-WinGetGitHubBranch -ModuleName WinGetGitHubRepo { throw 'Must not resolve the branch again' }
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo { [pscustomobject]@{ object = [pscustomobject]@{ sha = $Body.sha } } }
+    $Revision = 'c' * 40
+    $Result = New-WinGetGitHubBranch -Name 'new-branch' -RepoOwner 'Example' -RepoName 'repo' -RepoBranch main -SourceSha $Revision
+    $Result.object.sha | Should -Be $Revision
+    Should -Invoke Get-WinGetGitHubBranch -ModuleName WinGetGitHubRepo -Times 0 -Exactly
+    Should -Invoke Invoke-GitHubApi -ModuleName WinGetGitHubRepo -Times 1 -Exactly -ParameterFilter { $Body.sha -eq $Revision -and $Body.ref -eq 'refs/heads/new-branch' }
+  }
   It 'throws when GitHub GraphQL reports an error instead of a commit' {
     Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
       [pscustomobject]@{ errors = @([pscustomobject]@{ message = 'Expected head OID does not match' }) }
@@ -37,7 +46,7 @@ Describe 'Add-WinGetGitHubManifests' {
   }
 }
 
-Describe 'Invoke-WinGetGitHubCommitMutation' {
+Describe 'Invoke-WinGetGitHubCommitMutation' -Tag Unit {
   BeforeEach {
     $Script:OldHead = 'a' * 40
     $Script:NewHead = 'b' * 40
@@ -108,7 +117,7 @@ Describe 'Invoke-WinGetGitHubCommitMutation' {
   }
 }
 
-Describe 'Remove-WinGetGitHubManifests' {
+Describe 'Remove-WinGetGitHubManifests' -Tag Unit {
   It 'returns only the created commit OID' {
     Mock Get-WinGetGitHubManifests -ModuleName WinGetGitHubRepo { @([pscustomobject]@{ path = 'Vendor.Package.yaml' }) }
     Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
@@ -122,7 +131,7 @@ Describe 'Remove-WinGetGitHubManifests' {
   }
 }
 
-Describe 'Get-WinGetGitHubComparison' {
+Describe 'Get-WinGetGitHubComparison' -Tag Unit {
   It 'uses owner-qualified and URI-escaped fork references' {
     $Script:GitHubApiUri = $null
     Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
@@ -142,7 +151,7 @@ Describe 'Get-WinGetGitHubComparison' {
   }
 }
 
-Describe 'Get-WinGetGitHubPullRequestFile' {
+Describe 'Get-WinGetGitHubPullRequestFile' -Tag Unit {
   It 'enumerates a JSON array returned as one Invoke-RestMethod pipeline object' {
     Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
       $Page = [object[]]@(
@@ -181,7 +190,7 @@ Describe 'Get-WinGetGitHubPullRequestFile' {
   }
 }
 
-Describe 'Remove-WinGetGitHubBranch' {
+Describe 'Remove-WinGetGitHubBranch' -Tag Unit {
   It 'deletes the escaped branch reference' {
     $Script:GitHubApiParameters = $null
     Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {

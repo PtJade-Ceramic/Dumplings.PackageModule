@@ -506,7 +506,14 @@ function Send-WinGetManifest {
     if (-not (Test-YamlObject -InputObject $NewPackageIdentifier -Schema (Get-WinGetManifestSchema -ManifestType version).properties.PackageIdentifier)) { throw "The PackageIdentifier `"${NewPackageIdentifier}`" is invalid" }
     [string]$NewPackageVersion = $Task.CurrentState.Contains('RealVersion') ? $Task.CurrentState.RealVersion : $Task.CurrentState.Version
     if (-not (Test-YamlObject -InputObject $NewPackageVersion -Schema (Get-WinGetManifestSchema -ManifestType version).properties.PackageVersion)) { throw "The PackageVersion `"${NewPackageVersion}`" is invalid" }
-    $RefPackageVersion = ($LocalRepoPath -and (Test-Path -Path $LocalRepoPath) ? (Get-WinGetLocalPackageVersion -PackageIdentifier $RefPackageIdentifier -RootPath $LocalRepoPath) : (Get-WinGetGitHubPackageVersion -PackageIdentifier $RefPackageIdentifier -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch -RootPath $RootPath)) | Select-Object -Last 1
+    # Version discovery, document reads, and branch creation must describe the
+    # same source revision even when other tasks advance the origin branch.
+    $ReferenceRevision = $null
+    if (-not ($LocalRepoPath -and (Test-Path -Path $LocalRepoPath))) {
+      $ReferenceRevision = (Get-WinGetGitHubBranch -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch).object.sha
+      if ([string]::IsNullOrWhiteSpace($ReferenceRevision)) { throw 'The reference branch did not return a commit SHA.' }
+    }
+    $RefPackageVersion = ($LocalRepoPath -and (Test-Path -Path $LocalRepoPath) ? (Get-WinGetLocalPackageVersion -PackageIdentifier $RefPackageIdentifier -RootPath $LocalRepoPath) : (Get-WinGetGitHubPackageVersion -PackageIdentifier $RefPackageIdentifier -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $ReferenceRevision -RootPath $RootPath)) | Select-Object -Last 1
     if (-not $RefPackageVersion) { throw "Could not find any version of the package ${RefPackageIdentifier}" }
 
     $NewManifestsPath = (New-Item -Path (Join-Path $Global:DumplingsOutput 'WinGet' $NewPackageIdentifier $NewPackageVersion) -ItemType Directory -Force).FullName
@@ -588,13 +595,15 @@ function Send-WinGetManifest {
       $Task.Log("Reading existing manifests from local repo at $LocalRepoPath", 'Verbose')
       $RefManifest = Read-WinGetLocalManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $RefPackageVersion -RootPath $LocalRepoPath | ConvertFrom-WinGetManifestYaml
     } else {
-      $RefManifest = Read-WinGetGitHubManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $RefPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch -RootPath $RootPath | ConvertFrom-WinGetManifestYaml
+      $RefManifest = Read-WinGetGitHubManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $RefPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $ReferenceRevision -RootPath $RootPath | ConvertFrom-WinGetManifestYaml
     }
     # Update the manifests
     if ($SkipInstallerAnalysis) {
       $Task.Log('Skipping installer analysis while generating WinGet manifests as configured', 'Info')
     }
-    $NewManifest = Update-WinGetManifest -Manifest $RefManifest -NewPackageIdentifier $NewPackageIdentifier -PackageVersion $NewPackageVersion -InstallerEntries $Task.CurrentState.Installer -LocaleEntries $Task.CurrentState.Locale -InstallerFiles $Task.InstallerFiles -ReplaceInstallers:$Task.Config['WinGetReplaceMode'] -SkipInstallerAnalysis:$SkipInstallerAnalysis -Logger $Task.Log
+    $TrackingArguments = @{}
+    if ($Task.PSObject.Properties['InstallerFileEvidence']) { $TrackingArguments.InstallerFileEvidence = $Task.InstallerFileEvidence }
+    $NewManifest = Update-WinGetManifest -Manifest $RefManifest -NewPackageIdentifier $NewPackageIdentifier -PackageVersion $NewPackageVersion -InstallerEntries $Task.CurrentState.Installer -LocaleEntries $Task.CurrentState.Locale -InstallerFiles $Task.InstallerFiles @TrackingArguments -ReplaceInstallers:$Task.Config['WinGetReplaceMode'] -SkipInstallerAnalysis:$SkipInstallerAnalysis -Logger $Task.Log
     $NewManifests = $NewManifest | ConvertTo-WinGetManifestYaml
     #endregion
 
@@ -612,7 +621,9 @@ function Send-WinGetManifest {
     # The new branch is based on the default branch of the origin repo instead of the one of the upstream repo
     # This is to mitigate the occasional and weird issue of "ref not found" when creating a branch based on the upstream default branch
     # The origin repo should be synced as early as possible to avoid conflicts with other commits
-    $NewBranch = New-WinGetGitHubBranch -Name $NewBranchName -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch
+    $SourceArguments = @{}
+    if ($ReferenceRevision) { $SourceArguments.SourceSha = $ReferenceRevision }
+    $NewBranch = New-WinGetGitHubBranch -Name $NewBranchName -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch @SourceArguments
 
     # Upload new manifests
     $NewCommitSha = Add-WinGetGitHubManifests -PackageIdentifier $NewPackageIdentifier -PackageVersion $NewPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $NewBranchName -RepoSha $NewBranch.object.sha -RootPath $RootPath -Manifest $NewManifests -CommitMessage $NewCommitName

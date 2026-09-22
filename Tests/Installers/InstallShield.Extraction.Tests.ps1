@@ -232,7 +232,7 @@ Describe 'InstallShield cabinets and extraction' -Tag Unit {
     }
   }
 
-  It 'parses NB10-prefixed CastleDriver launchers from both architecture payloads' {
+  It 'parses NB10-prefixed CastleDriver launchers from both architecture payloads' -Tag RealFixture {
     foreach ($Fixture in @(Get-CastleDriverInstallerFixture)) {
       $ExpandedPath = Join-Path $TestDrive "castle-driver-$($Fixture.Architecture)"
       $Info = Get-InstallShieldInfo -Path $Fixture.Path -DestinationPath $ExpandedPath

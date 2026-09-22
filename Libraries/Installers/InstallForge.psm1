@@ -52,27 +52,6 @@ $Script:InstallForgeMaximumAnalysisBytes = 512MB
 $Script:InstallForgeMaximumAnalysisFiles = 32
 $Script:InstallForgePayloadMarker = [Text.Encoding]::ASCII.GetBytes('JGTFUVQ`TUBSU')
 
-function Get-InstallForgeDictionaryValue {
-  <#
-  .SYNOPSIS
-    Read the first present key from a case-insensitive configuration section.
-  .PARAMETER Dictionary
-    Configuration section. Null is accepted.
-  .PARAMETER Name
-    Candidate keys in precedence order.
-  #>
-  param (
-    [AllowNull()][Collections.IDictionary]$Dictionary,
-    [Parameter(Mandatory)][string[]]$Name
-  )
-
-  if ($null -eq $Dictionary) { return $null }
-  foreach ($Candidate in $Name) {
-    if ($Dictionary.Contains($Candidate)) { return $Dictionary[$Candidate] }
-  }
-  return $null
-}
-
 function Test-InstallForgeBooleanValue {
   <#
   .SYNOPSIS
@@ -246,19 +225,6 @@ function Read-InstallForgeByteLine {
     }
   }
   throw 'An InstallForge table text field is not terminated by CRLF.'
-}
-
-function ConvertFrom-InstallForgeIni {
-  <#
-  .SYNOPSIS
-    Parse the compiled SC.dat configuration without evaluating commands.
-  .PARAMETER Content
-    Decoded SC.dat text.
-  #>
-  [OutputType([Collections.Specialized.OrderedDictionary])]
-  param ([Parameter(Mandatory)][string]$Content)
-
-  return ConvertFrom-Ini -Content $Content -DuplicateKeyAction Last -IgnoreComments
 }
 
 function Read-InstallForgeArchiveEntries {
@@ -708,9 +674,9 @@ function Get-InstallForgeConstantMap {
   param ([Parameter(Mandatory)][Collections.IDictionary]$Setup)
 
   $Map = [ordered]@{
-    AppName               = [string](Get-InstallForgeDictionaryValue -Dictionary $Setup -Name Appname)
-    AppVersion            = [string](Get-InstallForgeDictionaryValue -Dictionary $Setup -Name Version)
-    Company               = [string](Get-InstallForgeDictionaryValue -Dictionary $Setup -Name Company)
+    AppName               = [string](Get-DictionaryValue -Dictionary $Setup -Name Appname)
+    AppVersion            = [string](Get-DictionaryValue -Dictionary $Setup -Name Version)
+    Company               = [string](Get-DictionaryValue -Dictionary $Setup -Name Company)
     ProgramFiles          = '%ProgramFiles(x86)%'
     ProgramFilesX86       = '%ProgramFiles(x86)%'
     ProgramFilesX64       = '%ProgramFiles%'
@@ -742,7 +708,7 @@ function Get-InstallForgeConstantMap {
     SystemX86             = '%WINDIR%\SysWOW64'
     Fonts                 = '%WINDIR%\Fonts'
   }
-  $InstallDir = [string](Get-InstallForgeDictionaryValue -Dictionary $Setup -Name InstallDir)
+  $InstallDir = [string](Get-DictionaryValue -Dictionary $Setup -Name InstallDir)
   for ($Pass = 0; $Pass -lt 8; $Pass++) {
     $Previous = $InstallDir
     foreach ($Key in @($Map.Keys)) {
@@ -804,7 +770,7 @@ function Get-InstallForgeShortcutRecords {
     foreach ($Record in ConvertFrom-InstallForgeFixedRecordTable -Text $Text -FieldName $FieldNames -Source $Name) {
       $IsDesktop = $Name -ieq 'Desktop.dat'
       $PolicyName = $IsDesktop ? 'DFA' : 'SFA'
-      $PolicyValue = Get-InstallForgeDictionaryValue -Dictionary $Setup -Name $PolicyName
+      $PolicyValue = Get-DictionaryValue -Dictionary $Setup -Name $PolicyName
       $AllUsers = $null -eq $PolicyValue ? $null : (Test-InstallForgeBooleanValue -Value $PolicyValue)
       $Record | Add-Member -NotePropertyName Destination -NotePropertyValue ($IsDesktop ? 'Desktop' : 'StartMenu')
       $Record | Add-Member -NotePropertyName AllUsers -NotePropertyValue $AllUsers
@@ -1040,13 +1006,13 @@ function Get-InstallForgePayloadEvidence {
   )
 
   $Empty = [pscustomobject]@{
-    Architectures                = [string[]]@()
-    ArchitectureInfo             = $null
-    DependencyInfo               = $null
-    CandidateEvidence            = [object[]]@()
-    InspectedFiles               = [string[]]@()
-    AnalysisRoute                = 'None'
-    PayloadArchitectureComplete  = $false
+    Architectures               = [string[]]@()
+    ArchitectureInfo            = $null
+    DependencyInfo              = $null
+    CandidateEvidence           = [object[]]@()
+    InspectedFiles              = [string[]]@()
+    AnalysisRoute               = 'None'
+    PayloadArchitectureComplete = $false
   }
   if (-not $Layout.Payload) { return $Empty }
 
@@ -1172,12 +1138,12 @@ function Get-InstallForgePayloadEvidence {
       $ArchitectureResults[0].ArchitectureInfo
     } elseif ($ArchitectureResults.Count -gt 1) {
       [pscustomobject]@{
-        AnalysisRoute                    = $AnalysisRoute
-        CandidateInfo                    = @($ArchitectureResults | ForEach-Object ArchitectureInfo)
-        RecommendedWinGetArchitecture    = $Architectures.Count -eq 1 ? $Architectures[0] : $null
-        RecommendedWinGetArchitectures   = $Architectures
-        SupportedArchitectures           = $Architectures
-        Diagnostics                      = @(Merge-InstallerDiagnostics -Diagnostic @($ArchitectureResults.ArchitectureInfo.Diagnostics))
+        AnalysisRoute                  = $AnalysisRoute
+        CandidateInfo                  = @($ArchitectureResults | ForEach-Object ArchitectureInfo)
+        RecommendedWinGetArchitecture  = $Architectures.Count -eq 1 ? $Architectures[0] : $null
+        RecommendedWinGetArchitectures = $Architectures
+        SupportedArchitectures         = $Architectures
+        Diagnostics                    = @(Merge-InstallerDiagnostics -Diagnostic @($ArchitectureResults.ArchitectureInfo.Diagnostics))
       }
     } else { $null }
 
@@ -1187,21 +1153,21 @@ function Get-InstallForgePayloadEvidence {
     } elseif ($DependencyResults.Count -gt 1) {
       $RecommendedDependencies = @($DependencyResults.DependencyInfo.RecommendedPackageDependencies | Group-Object { "$($_.PackageIdentifier)`0$($_.MinimumVersion)" } | ForEach-Object { $_.Group[0] } | Sort-Object -Property PackageIdentifier, MinimumVersion)
       [pscustomobject]@{
-        Path                             = $null
-        CheckedFiles                     = @($DependencyResults.DependencyInfo.CheckedFiles | Sort-Object -Unique)
-        CheckedPEFiles                   = @($DependencyResults.DependencyInfo.CheckedPEFiles | Sort-Object -Unique)
-        ImportedDlls                     = @($DependencyResults.DependencyInfo.ImportedDlls)
-        DependsOnVCRedist                = $true -in @($DependencyResults.DependencyInfo.DependsOnVCRedist)
-        DependsOnUcrt                    = $true -in @($DependencyResults.DependencyInfo.DependsOnUcrt)
-        DependsOnVisualCRuntime          = $true -in @($DependencyResults.DependencyInfo.DependsOnVisualCRuntime)
-        DependsOnDotNetRuntime           = $true -in @($DependencyResults.DependencyInfo.DependsOnDotNetRuntime)
-        VCRedistImports                  = @($DependencyResults.DependencyInfo.VCRedistImports)
-        UcrtImports                      = @($DependencyResults.DependencyInfo.UcrtImports)
-        DotNetInfo                       = $null
-        CandidateDependencyInfo          = @($DependencyResults | ForEach-Object DependencyInfo)
-        RecommendedPackageDependencyIds  = @($DependencyResults.DependencyInfo.RecommendedPackageDependencyIds | Sort-Object -Unique)
-        RecommendedPackageDependencies   = $RecommendedDependencies
-        Diagnostics                      = @(Merge-InstallerDiagnostics -Diagnostic @($DependencyResults.DependencyInfo.Diagnostics))
+        Path                            = $null
+        CheckedFiles                    = @($DependencyResults.DependencyInfo.CheckedFiles | Sort-Object -Unique)
+        CheckedPEFiles                  = @($DependencyResults.DependencyInfo.CheckedPEFiles | Sort-Object -Unique)
+        ImportedDlls                    = @($DependencyResults.DependencyInfo.ImportedDlls)
+        DependsOnVCRedist               = $true -in @($DependencyResults.DependencyInfo.DependsOnVCRedist)
+        DependsOnUcrt                   = $true -in @($DependencyResults.DependencyInfo.DependsOnUcrt)
+        DependsOnVisualCRuntime         = $true -in @($DependencyResults.DependencyInfo.DependsOnVisualCRuntime)
+        DependsOnDotNetRuntime          = $true -in @($DependencyResults.DependencyInfo.DependsOnDotNetRuntime)
+        VCRedistImports                 = @($DependencyResults.DependencyInfo.VCRedistImports)
+        UcrtImports                     = @($DependencyResults.DependencyInfo.UcrtImports)
+        DotNetInfo                      = $null
+        CandidateDependencyInfo         = @($DependencyResults | ForEach-Object DependencyInfo)
+        RecommendedPackageDependencyIds = @($DependencyResults.DependencyInfo.RecommendedPackageDependencyIds | Sort-Object -Unique)
+        RecommendedPackageDependencies  = $RecommendedDependencies
+        Diagnostics                     = @(Merge-InstallerDiagnostics -Diagnostic @($DependencyResults.DependencyInfo.Diagnostics))
       }
     } else { $null }
 
@@ -1236,9 +1202,9 @@ function Get-InstallForgeInfo {
       default { $null }
     }
     $ConfigurationText = Get-InstallForgeConfigurationText -Layout $Layout -Name 'SC.dat'
-    $Configuration = ConvertFrom-InstallForgeIni -Content $ConfigurationText
+    $Configuration = ConvertFrom-Ini -DuplicateKeyAction Last -IgnoreComments -Content $ConfigurationText
     $Setup = $Configuration['Setup']
-    if (-not $Setup -or [string]::IsNullOrWhiteSpace([string](Get-InstallForgeDictionaryValue -Dictionary $Setup -Name Appname))) { throw 'InstallForge SC.dat does not contain a usable Setup/Appname value.' }
+    if (-not $Setup -or [string]::IsNullOrWhiteSpace([string](Get-DictionaryValue -Dictionary $Setup -Name Appname))) { throw 'InstallForge SC.dat does not contain a usable Setup/Appname value.' }
 
     $Diagnostics = [Collections.Generic.List[object]]::new()
     $Unresolved = [Collections.Generic.List[string]]::new()
@@ -1272,27 +1238,27 @@ function Get-InstallForgeInfo {
     $AssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
     $Diagnostics.AddRange([object[]]$AssociationInfo.Diagnostics)
 
-    $DisplayName = [string](Get-InstallForgeDictionaryValue -Dictionary $Setup -Name Appname)
-    $DisplayVersion = [string](Get-InstallForgeDictionaryValue -Dictionary $Setup -Name Version)
-    $Publisher = [string](Get-InstallForgeDictionaryValue -Dictionary $Setup -Name Company)
-    $InstallLocationExpression = [string](Get-InstallForgeDictionaryValue -Dictionary $Setup -Name InstallDir)
+    $DisplayName = [string](Get-DictionaryValue -Dictionary $Setup -Name Appname)
+    $DisplayVersion = [string](Get-DictionaryValue -Dictionary $Setup -Name Version)
+    $Publisher = [string](Get-DictionaryValue -Dictionary $Setup -Name Company)
+    $InstallLocationExpression = [string](Get-DictionaryValue -Dictionary $Setup -Name InstallDir)
     $InstallLocationCandidate = Resolve-InstallForgeConstantValue -Value $InstallLocationExpression -Constant $Constant
     $InstallLocation = (Test-InstallForgeResolvedValue -Value $InstallLocationCandidate) ? $InstallLocationCandidate : $null
     if (-not $InstallLocation) {
       $Unresolved.Add('DefaultInstallLocation')
       $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallForge.Metadata.InstallLocationUnresolved' -Source InstallForge -Message 'The default installation path depends on a registry-backed or unknown runtime variable.' -Kind Incomplete -Areas Metadata -AffectedFields DefaultInstallLocation))
     }
-    $WritesBuiltInArp = Test-InstallForgeBooleanValue -Value (Get-InstallForgeDictionaryValue -Dictionary $Setup -Name Uninstaller)
+    $WritesBuiltInArp = Test-InstallForgeBooleanValue -Value (Get-DictionaryValue -Dictionary $Setup -Name Uninstaller)
     $RequestedExecutionLevel = Get-PERequestedExecutionLevel -Path $Layout.Path
     $LegacyArpRuntime = Test-InstallForgeLegacyArpRuntime -Layout $Layout
-    $UninstallerName = [string](Get-InstallForgeDictionaryValue -Dictionary $Setup -Name UninstallerFilename)
+    $UninstallerName = [string](Get-DictionaryValue -Dictionary $Setup -Name UninstallerFilename)
     if ($WritesBuiltInArp -and [string]::IsNullOrWhiteSpace($UninstallerName)) { $UninstallerName = $Layout.Generation -eq 'Legacy' ? 'Uninstall.exe' : 'Uninstall' }
     if ($WritesBuiltInArp -and $Layout.Generation -eq 'Legacy' -and -not $UninstallerName.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase)) { $UninstallerName += '.exe' }
     $UninstallString = ($WritesBuiltInArp -and $InstallLocation) ? ((Join-Path $InstallLocation $UninstallerName).TrimEnd('\')) : $null
-    $CustomIconEnabled = Test-InstallForgeBooleanValue -Value (Get-InstallForgeDictionaryValue -Dictionary $Setup -Name UninstallerUseCustomDisplayIcon)
-    $DisplayIconCandidate = $CustomIconEnabled ? (Resolve-InstallForgeConstantValue -Value ([string](Get-InstallForgeDictionaryValue -Dictionary $Setup -Name UninstallerCustomDisplayIcon)) -Constant $Constant) : $UninstallString
+    $CustomIconEnabled = Test-InstallForgeBooleanValue -Value (Get-DictionaryValue -Dictionary $Setup -Name UninstallerUseCustomDisplayIcon)
+    $DisplayIconCandidate = $CustomIconEnabled ? (Resolve-InstallForgeConstantValue -Value ([string](Get-DictionaryValue -Dictionary $Setup -Name UninstallerCustomDisplayIcon)) -Constant $Constant) : $UninstallString
     $DisplayIcon = ($WritesBuiltInArp -and (Test-InstallForgeResolvedValue -Value $DisplayIconCandidate)) ? $DisplayIconCandidate : $null
-    $RegistryView = (Test-InstallForgeBooleanValue -Value (Get-InstallForgeDictionaryValue -Dictionary $Setup -Name Uninstaller_VW)) ? '64-bit' : '32-bit'
+    $RegistryView = (Test-InstallForgeBooleanValue -Value (Get-DictionaryValue -Dictionary $Setup -Name Uninstaller_VW)) ? '64-bit' : '32-bit'
 
     # Controlled 1.6.1 installation proves that the native engine writes the
     # built-in ARP row to HKLM, uses Appname as its key, and omits the physical
@@ -1300,11 +1266,11 @@ function Get-InstallForgeInfo {
     $BuiltInEntry = $null
     if ($WritesBuiltInArp) {
       if ($Layout.Generation -eq 'Modern') {
-        $ArchiveSize = [long](Get-InstallForgeDictionaryValue -Dictionary $Configuration['SetupArchive'] -Name SetupArchiveFilesUncompressedSize)
+        $ArchiveSize = [long](Get-DictionaryValue -Dictionary $Configuration['SetupArchive'] -Name SetupArchiveFilesUncompressedSize)
         $BuiltInEntry = [pscustomobject]@{
           ProductCode = $DisplayName; DisplayName = $DisplayName; DisplayVersion = $DisplayVersion; Publisher = $Publisher
           UninstallString = $UninstallString; QuietUninstallString = $null; DisplayIcon = $DisplayIcon; InstallLocation = $InstallLocation
-          HelpLink = [string](Get-InstallForgeDictionaryValue -Dictionary $Setup -Name Website1); EstimatedSize = $ArchiveSize -gt 0 ? [long][Math]::Ceiling($ArchiveSize / 1KB) : $null
+          HelpLink = [string](Get-DictionaryValue -Dictionary $Setup -Name Website1); EstimatedSize = $ArchiveSize -gt 0 ? [long][Math]::Ceiling($ArchiveSize / 1KB) : $null
           NoModify = 1; NoRepair = 1; SystemComponent = 0; RegistryHive = 'HKLM'; RegistryView = $RegistryView; IsVisible = $true; Source = 'Built-in uninstaller configuration'
         }
       } elseif ($LegacyArpRuntime) {
@@ -1314,7 +1280,7 @@ function Get-InstallForgeInfo {
         $BuiltInEntry = [pscustomobject]@{
           ProductCode = $DisplayName; DisplayName = $DisplayName; DisplayVersion = $DisplayVersion; Publisher = $Publisher
           UninstallString = $UninstallString; QuietUninstallString = $null; DisplayIcon = $UninstallString; InstallLocation = $null
-          HelpLink = [string](Get-InstallForgeDictionaryValue -Dictionary $Setup -Name Website1); EstimatedSize = $null
+          HelpLink = [string](Get-DictionaryValue -Dictionary $Setup -Name Website1); EstimatedSize = $null
           NoModify = $null; NoRepair = $null; SystemComponent = $null; RegistryHive = 'HKLM'; RegistryView = $RegistryView; IsVisible = $true; Source = 'Legacy built-in uninstaller configuration'
         }
       } else {
@@ -1369,8 +1335,8 @@ function Get-InstallForgeInfo {
         $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallForge.Shortcut.RuntimeValueUnresolved' -Source InstallForge -Message "$($Shortcut.Destination) shortcut $($Shortcut.Index) depends on runtime-only value(s) in: $($ShortcutUnresolvedProperties -join ', ')." -Kind Incomplete -Areas Installability -Evidence ([ordered]@{ Destination = $Shortcut.Destination; Index = $Shortcut.Index; Properties = [string[]]$ShortcutUnresolvedProperties })))
       }
     }
-    $StartMenuAllUsersValue = Get-InstallForgeDictionaryValue -Dictionary $Setup -Name SFA
-    $DesktopAllUsersValue = Get-InstallForgeDictionaryValue -Dictionary $Setup -Name DFA
+    $StartMenuAllUsersValue = Get-DictionaryValue -Dictionary $Setup -Name SFA
+    $DesktopAllUsersValue = Get-DictionaryValue -Dictionary $Setup -Name DFA
     $StartMenuShortcutsForAllUsers = $null -eq $StartMenuAllUsersValue ? $null : (Test-InstallForgeBooleanValue -Value $StartMenuAllUsersValue)
     $DesktopShortcutsForAllUsers = $null -eq $DesktopAllUsersValue ? $null : (Test-InstallForgeBooleanValue -Value $DesktopAllUsersValue)
     $Commands = @(Get-InstallForgeCommandRecords -Layout $Layout -Constant $Constant -Diagnostics $Diagnostics)
@@ -1393,14 +1359,14 @@ function Get-InstallForgeInfo {
     if ($WritesBuiltInArp -and -not $GeneratedUninstallerEntry) {
       $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallForge.Extraction.UninstallerRuntimeGenerated' -Source InstallForge -Message 'The configured uninstaller is generated by the setup runtime and is not present as an independently extractable payload record.' -Kind Information -Areas Extraction -Evidence ([ordered]@{ Generation = $Layout.Generation; FileName = $UninstallerName })))
     }
-    $MainExecutableExpression = [string](Get-InstallForgeDictionaryValue -Dictionary $Setup -Name ProgramRun)
+    $MainExecutableExpression = [string](Get-DictionaryValue -Dictionary $Setup -Name ProgramRun)
     $MainExecutableCandidate = Resolve-InstallForgeConstantValue -Value $MainExecutableExpression -Constant $Constant
     $MainExecutable = (Test-InstallForgeResolvedValue -Value $MainExecutableCandidate) ? $MainExecutableCandidate : $null
     $PayloadEvidence = Get-InstallForgePayloadEvidence -Layout $Layout -MainExecutable $MainExecutable -InstallLocation $InstallLocation -GeneratedUninstallerEntry $GeneratedUninstallerEntry -Diagnostics $Diagnostics
     $FinishAction = [pscustomobject]@{
-      Launch = (Get-InstallForgeDictionaryValue -Dictionary $Setup -Name Addition) -eq '1'
-      Program = Resolve-InstallForgeConstantValue -Value ([string](Get-InstallForgeDictionaryValue -Dictionary $Setup -Name ProgramRun)) -Constant $Constant
-      Arguments = Resolve-InstallForgeConstantValue -Value ([string](Get-InstallForgeDictionaryValue -Dictionary $Setup -Name ProgramRunArguments)) -Constant $Constant
+      Launch    = (Get-DictionaryValue -Dictionary $Setup -Name Addition) -eq '1'
+      Program   = Resolve-InstallForgeConstantValue -Value ([string](Get-DictionaryValue -Dictionary $Setup -Name ProgramRun)) -Constant $Constant
+      Arguments = Resolve-InstallForgeConstantValue -Value ([string](Get-DictionaryValue -Dictionary $Setup -Name ProgramRunArguments)) -Constant $Constant
     }
     $FinishActionUnresolvedProperties = @(Get-InstallForgeUnresolvedPropertyName -InputObject $FinishAction -PropertyName Program, Arguments)
     $FinishAction | Add-Member -NotePropertyName HasUnresolvedRuntimeValue -NotePropertyValue ($FinishActionUnresolvedProperties.Count -gt 0)
@@ -1426,8 +1392,8 @@ function Get-InstallForgeInfo {
       Family = 'InstallForge'; FormatGeneration = $Layout.Generation; ContainerRoute = $Layout.ContainerRoute; PayloadRoute = $Layout.PayloadRoute; LegacyArpRuntimeSupport = $Layout.Generation -eq 'Legacy' ? $LegacyArpRuntime : $null
       RequestedExecutionLevel = $RequestedExecutionLevel; ElevationRequirement = $RequestedExecutionLevel -eq 'requireAdministrator' ? 'elevationRequired' : $null
       SupportedScopes = $Scope ? @($Scope) : @(); SupportsSilentInstallation = $false; InstallerSwitches = [ordered]@{}; InstallModes = @('interactive'); InstallerSuccessCodes = @()
-      PublisherUrl = [string](Get-InstallForgeDictionaryValue -Dictionary $Setup -Name Website1); MainExecutable = $MainExecutable; MainExecutableExpression = $MainExecutableExpression
-      MainExecutableArguments = [string](Get-InstallForgeDictionaryValue -Dictionary $Setup -Name ProgramRunArguments); Uninstaller = $UninstallerName; UninstallString = $UninstallString; QuietUninstallString = $null; DisplayIcon = $DisplayIcon; GeneratedUninstallerEntry = $GeneratedUninstallerEntry; GeneratedUninstallerExtractable = $null -ne $GeneratedUninstallerEntry
+      PublisherUrl = [string](Get-DictionaryValue -Dictionary $Setup -Name Website1); MainExecutable = $MainExecutable; MainExecutableExpression = $MainExecutableExpression
+      MainExecutableArguments = [string](Get-DictionaryValue -Dictionary $Setup -Name ProgramRunArguments); Uninstaller = $UninstallerName; UninstallString = $UninstallString; QuietUninstallString = $null; DisplayIcon = $DisplayIcon; GeneratedUninstallerEntry = $GeneratedUninstallerEntry; GeneratedUninstallerExtractable = $null -ne $GeneratedUninstallerEntry
       RegistryHive = $BuiltInEntry ? 'HKLM' : ($CustomEntries.Count -eq 1 ? $CustomEntries[0].RegistryHive : $null); RegistryView = $BuiltInEntry ? $RegistryView : ($CustomEntries.Count -eq 1 ? $CustomEntries[0].RegistryView : $null)
       AppsAndFeaturesEntries = $AppsAndFeaturesEntries; AppsAndFeaturesEvidence = $VisibleArpEntries; BuiltInAppsAndFeaturesEntry = $BuiltInManifestEntry; BuiltInAppsAndFeaturesEvidence = $BuiltInEntry; CustomAppsAndFeaturesEntries = $CustomEntries
       RegistryWrites = $RegistryWrites; RegistryOperations = $RegistryOperations; RegistryAssociationInfo = $AssociationInfo; Protocols = [string[]]$AssociationInfo.Protocols; FileExtensions = [string[]]$AssociationInfo.FileExtensions
@@ -1495,9 +1461,9 @@ function Test-InstallForge {
   process {
     try {
       $Layout = Get-InstallForgeLayout -Path $Path
-      $Configuration = ConvertFrom-InstallForgeIni -Content (Get-InstallForgeConfigurationText -Layout $Layout -Name 'SC.dat')
+      $Configuration = ConvertFrom-Ini -DuplicateKeyAction Last -IgnoreComments -Content (Get-InstallForgeConfigurationText -Layout $Layout -Name 'SC.dat')
       $Setup = $Configuration['Setup']
-      return $null -ne $Setup -and -not [string]::IsNullOrWhiteSpace([string](Get-InstallForgeDictionaryValue -Dictionary $Setup -Name Appname))
+      return $null -ne $Setup -and -not [string]::IsNullOrWhiteSpace([string](Get-DictionaryValue -Dictionary $Setup -Name Appname))
     } catch {
       return $false
     }

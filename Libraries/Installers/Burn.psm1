@@ -34,31 +34,7 @@ if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDe
 # Force stop on error
 $ErrorActionPreference = 'Stop'
 
-function Get-Assembly {
-  <#
-  .SYNOPSIS
-    Get the Microsoft.Deployment.Compression.Cab.dll assembly
-  #>
-  [OutputType([string])]
-  param ()
-
-  if (Test-Path -Path ($Path = Join-Path $PSScriptRoot '..' '..' 'Assets' 'Assemblies' 'Microsoft.Deployment.Compression.Cab.dll')) {
-    return (Get-Item -Path $Path -Force)
-  } else {
-    throw 'The Microsoft.Deployment.Compression.Cab.dll assembly could not be found'
-  }
-}
-
-function Import-Assembly {
-  <#
-  .SYNOPSIS
-    Load the Microsoft.Deployment.Compression.Cab.dll assembly
-  #>
-
-  Import-CabinetDependency
-}
-
-Import-Assembly
+Import-CabinetDependency
 
 # .wixburn field offsets are relative to the section's raw file range.
 $BURN_SECTION_OFFSET_MAGIC = 0

@@ -377,20 +377,7 @@ function Read-SquirrelNuspecFromZipArchive {
   $Entry = $NuspecEntries[0]
 
   $XmlText = Read-InstallerArchiveEntryText -Entry $Entry -MaximumBytes 2097152
-  $Settings = [Xml.XmlReaderSettings]::new()
-  $Settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
-  $Settings.XmlResolver = $null
-  $Settings.MaxCharactersInDocument = 2097152
-  $StringReader = [IO.StringReader]::new($XmlText)
-  $XmlReader = [Xml.XmlReader]::Create($StringReader, $Settings)
-  $Xml = [Xml.XmlDocument]::new()
-  $Xml.XmlResolver = $null
-  try {
-    $Xml.Load($XmlReader)
-  } finally {
-    $XmlReader.Dispose()
-    $StringReader.Dispose()
-  }
+  $Xml = Read-BoundedXmlDocument -Content $XmlText -MaximumCharacters 2097152
 
   $Metadata = $Xml.SelectSingleNode('/*[local-name()="package"]/*[local-name()="metadata"]')
   if (-not $Metadata) { return $null }

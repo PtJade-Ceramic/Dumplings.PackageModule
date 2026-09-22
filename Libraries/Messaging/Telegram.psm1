@@ -3,6 +3,8 @@
 # Long-message and Markdown failure behavior was independently implemented after reviewing
 # https://github.com/NousResearch/hermes-agent under its repository license.
 
+Import-Module (Join-Path $PSScriptRoot '..' 'Networking' 'Web.psm1') -ErrorAction Stop
+
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
@@ -164,7 +166,7 @@ function Invoke-TelegramApi {
         }
 
         $Delay = $RetryIntervalSec
-        if ($Delay -gt $MaximumRetryDelaySeconds -or $TotalDelay + $Delay -gt $MaximumTotalRetryDelaySeconds) {
+        if (-not (Test-RetryDelayBudget -DelaySeconds $Delay -UsedSeconds $TotalDelay -MaximumSeconds $MaximumRetryDelaySeconds -MaximumTotalSeconds $MaximumTotalRetryDelaySeconds)) {
           throw [System.InvalidOperationException]::new("Telegram ${Method} transport failure exceeded the retry-delay limit: ${SanitizedMessage}")
         }
         if ($RateLimitContext) { $RateLimitContext.SetRetryAfter([timespan]::FromSeconds($Delay)) } else { Start-Sleep -Seconds $Delay }
@@ -184,7 +186,7 @@ function Invoke-TelegramApi {
       } else {
         $RetryIntervalSec
       }
-      if ($RequestedDelay -gt $MaximumRetryDelaySeconds -or $TotalDelay + $RequestedDelay -gt $MaximumTotalRetryDelaySeconds) {
+      if (-not (Test-RetryDelayBudget -DelaySeconds $RequestedDelay -UsedSeconds $TotalDelay -MaximumSeconds $MaximumRetryDelaySeconds -MaximumTotalSeconds $MaximumTotalRetryDelaySeconds)) {
         throw (Get-TelegramApiException -ErrorCode $ErrorCode -Description "${Description} (requested retry delay ${RequestedDelay}s exceeds the configured limit)")
       }
 

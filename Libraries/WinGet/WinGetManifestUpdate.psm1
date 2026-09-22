@@ -10,11 +10,78 @@ $ManifestHeader = '# Created with YamlCreate.ps1 Dumplings Mod'
 $Culture = 'en-US'
 $WinGetUserAgent = 'Microsoft-Delivery-Optimization/10.0'
 $WinGetBackupUserAgent = 'winget-cli WindowsPackageManager/1.7.10661 DesktopAppInstaller/Microsoft.DesktopAppInstaller v1.22.10661.0'
-$WinGetTempInstallerFiles = [ordered]@{}
 $Script:WinGetSharedInstallerFiles = [ordered]@{}
 # Expose the established cache variable as the same mutable dictionary while
 # retaining a private reference that parent-module re-export cannot detach.
 $WinGetInstallerFiles = $Script:WinGetSharedInstallerFiles
+
+function New-WinGetManifestUpdateContext {
+  <#
+  .SYNOPSIS
+    Own transient artifacts and cached evidence for one manifest update.
+  .OUTPUTS
+    An operation-local context. Never place this mutable object in shared storage.
+  #>
+  param ()
+  $Storage = Get-Variable DumplingsStorage -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+  return @{
+    Files            = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+    Hashes           = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+    FileEvidence     = @{}
+    NestedPaths      = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+    ParserResults    = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+    OwnedFiles       = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    OwnedDirectories = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    Performance      = $(if ($Storage) { $Storage['__DumplingsPerformance'] } else { $null })
+    InstallerSchema  = Get-WinGetManifestSchema -ManifestType installer
+  }
+}
+
+function Close-WinGetManifestUpdateContext {
+  <#
+  .SYNOPSIS
+    Remove only resources created by an update, including after a failure.
+  .PARAMETER Context
+    The operation-local owner; caller-supplied files are never registered here.
+  #>
+  param ([Parameter(Mandatory)]$Context)
+  foreach ($OwnedFile in $Context.OwnedFiles) {
+    if (Test-Path -LiteralPath $OwnedFile) { Remove-Item -LiteralPath $OwnedFile -Force -ErrorAction Continue }
+  }
+  foreach ($OwnedDirectory in $Context.OwnedDirectories) {
+    if (Test-Path -LiteralPath $OwnedDirectory) { Remove-Item -LiteralPath $OwnedDirectory -Recurse -Force -ErrorAction Continue }
+  }
+  $Context.OwnedFiles.Clear()
+  $Context.OwnedDirectories.Clear()
+  $Context.ParserResults.Clear()
+}
+
+function Invoke-WinGetUpdateParser {
+  <#
+  .SYNOPSIS
+    Reuse parser evidence only for identical files and behavior-affecting arguments.
+  .PARAMETER Context
+    Cache and measurement owner for this update.
+  .PARAMETER Arguments
+    Complete parser arguments; logging callbacks are deliberately not key material.
+  .PARAMETER Generic
+    Select the generic EXE adapter instead of the manifest-declared adapter.
+  .OUTPUTS
+    Parser evidence. Failed calls are never cached.
+  #>
+  param ([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][Collections.IDictionary]$Arguments, [switch]$Generic)
+  $File = Get-Item -LiteralPath $Arguments.Path -ErrorAction Stop
+  $KeyData = [ordered]@{ Path = $File.FullName; Length = $File.Length; Created = $File.CreationTimeUtc.Ticks; Modified = $File.LastWriteTimeUtc.Ticks; Generic = [bool]$Generic }
+  foreach ($Key in @($Arguments.Keys | Sort-Object)) { if ($Key -ne 'Logger') { $KeyData[$Key] = $Arguments[$Key] } }
+  $CacheKey = ConvertTo-Json -InputObject $KeyData -Depth 10 -Compress
+  if ($Context.ParserResults.ContainsKey($CacheKey)) { return $Context.ParserResults[$CacheKey] }
+  $StartedAt = [Diagnostics.Stopwatch]::GetTimestamp()
+  try {
+    $Result = if ($Generic) { Get-WinGetGenericInstallerManifestInfo @Arguments } else { Get-WinGetKnownInstallerManifestInfo @Arguments }
+    if ($null -ne $Result) { $Context.ParserResults[$CacheKey] = $Result }
+    return $Result
+  } finally { if ($Context.Performance) { $Context.Performance.Record('Parsing', $StartedAt) } }
+}
 $Script:WinGetAuthoringManifestVersion = '1.12.0'
 
 filter UniqueItems {
@@ -946,227 +1013,288 @@ function Update-WinGetInstallerManifestInstallerMetadata {
     [System.Collections.IDictionary]$OldInstaller,
     [Parameter(Mandatory, HelpMessage = 'The installer entry to use for updating the installer')]
     [System.Collections.IDictionary]$InstallerEntry,
-    [Parameter(HelpMessage = 'The installers that have updated for reference')]
-    [System.Collections.IDictionary[]]$Installers = @(),
     [Parameter(HelpMessage = 'The hashtable of downloaded installer files, with installer URL as the key and installer path as the value')]
     [System.Collections.IDictionary]$InstallerFiles,
     [Parameter(HelpMessage = 'Skip nested payload extraction, installer-family detection, and static metadata parsers')]
     [switch]$SkipInstallerAnalysis,
     [Parameter(DontShow)]
     [System.Collections.Generic.List[object]]$DiagnosticCollection = [System.Collections.Generic.List[object]]::new(),
+    [Parameter(DontShow)]$Operation,
     [Parameter(DontShow, HelpMessage = 'The scriptblock or method for logging')]
     [ValidateScript({ Get-Member -InputObject $_ -Name 'Invoke' -MemberType 'Method' })]
     $Logger = { param($Message, $Level) Write-Host $Message }
   )
 
-  $OwnDiagnosticCollection = -not $PSBoundParameters.ContainsKey('DiagnosticCollection')
 
-  # Replace the whitespace in the installer URL with %20 to make it clickable
-  # Keep the original URL for reference in downloading
-  $OriginalInstallerUrl = $Installer.InstallerUrl
-  $Installer.InstallerUrl = $Installer.InstallerUrl.Replace(' ', '%20')
+  $OwnOperation = $null -eq $Operation
+  if ($OwnOperation) { $Operation = New-WinGetManifestUpdateContext }
+  try {
+    $OwnDiagnosticCollection = -not $PSBoundParameters.ContainsKey('DiagnosticCollection')
 
-  # Update the installer using the matching installer
-  # Reuse metadata only for the same effective manifest branch. One URL can
-  # expose different payloads by architecture or different ARP keys by scope.
-  $MatchingInstaller = $Installers | Where-Object -FilterScript {
-    $_.InstallerUrl -ceq $Installer.InstallerUrl -and
-    $_['Architecture'] -ceq $Installer['Architecture'] -and
-    $_['Scope'] -ceq $Installer['Scope']
-  } | Select-Object -First 1
-  if ($MatchingInstaller -and ($Installer.Contains('NestedInstallerFiles') ? ((ConvertTo-Json -InputObject $Installer.NestedInstallerFiles -Depth 10 -Compress) -ceq (ConvertTo-Json -InputObject $MatchingInstaller.NestedInstallerFiles -Depth 10 -Compress)) : $true)) {
-    foreach ($Key in @('InstallerSha256', 'SignatureSha256', 'PackageFamilyName', 'ProductCode', 'ReleaseDate', 'AppsAndFeaturesEntries')) {
-      if ($MatchingInstaller.Contains($Key) -and -not $InstallerEntry.Contains($Key)) {
-        $Installer.$Key = $MatchingInstaller.$Key
-      } elseif (-not $MatchingInstaller.Contains($Key) -and $Installer.Contains($Key)) {
-        $Installer.Remove($Key)
+    # Replace the whitespace in the installer URL with %20 to make it clickable
+    # Keep the original URL for reference in downloading
+    $OriginalInstallerUrl = $Installer.InstallerUrl
+    $Installer.InstallerUrl = $Installer.InstallerUrl.Replace(' ', '%20')
+
+    # Reuse artifact evidence, never another entry's authored metadata. Even identical
+    # download URLs may have different existing fields and diagnostic requirements.
+    # Analyze cached installer files even when the task supplied a hash for update detection.
+    $HasCachedInstallerFile = $InstallerFiles.Contains($OriginalInstallerUrl) -and (Test-Path -Path $InstallerFiles[$OriginalInstallerUrl])
+    $DownloadResult = $null
+    if (-not $Installer.Contains('InstallerSha256') -or $HasCachedInstallerFile) {
+      if ($Operation.Files.ContainsKey($OriginalInstallerUrl) -and (Test-Path -Path $Operation.Files[$OriginalInstallerUrl])) {
+        # Skip downloading if the installer file is already downloaded
+        $InstallerPath = $Operation.Files[$OriginalInstallerUrl]
+      } elseif ($InstallerFiles.Contains($OriginalInstallerUrl) -and (Test-Path -Path $InstallerFiles[$OriginalInstallerUrl])) {
+        # Skip downloading if the installer file was previously downloaded
+        $InstallerPath = $InstallerFiles[$OriginalInstallerUrl]
+      } elseif ($Script:WinGetSharedInstallerFiles.Contains($OriginalInstallerUrl) -and (Test-Path -Path $Script:WinGetSharedInstallerFiles[$OriginalInstallerUrl])) {
+        # Skip downloading if the installer file was previously downloaded
+        $InstallerPath = $Script:WinGetSharedInstallerFiles[$OriginalInstallerUrl]
+      } else {
+        $Logger.Invoke("Downloading $($Installer.InstallerUrl)", 'Verbose')
+        $InstallerPath = New-TempFile
+        $null = $Operation.OwnedFiles.Add($InstallerPath)
+        $StartedAt = [Diagnostics.Stopwatch]::GetTimestamp()
+        try { $DownloadResult = Invoke-WinGetInstallerDownload -Uri $Installer.InstallerUrl -DestinationPath $InstallerPath }
+        finally { if ($Operation.Performance) { $Operation.Performance.Record('Download', $StartedAt) } }
+        $null = $Operation.OwnedFiles.Add($DownloadResult.DestinationPath)
+        $Operation.Files[$OriginalInstallerUrl] = $InstallerPath = $DownloadResult.DestinationPath
       }
-    }
-  }
 
-  # Analyze cached installer files even when the task supplied a hash for update detection.
-  $HasCachedInstallerFile = $InstallerFiles.Contains($OriginalInstallerUrl) -and (Test-Path -Path $InstallerFiles[$OriginalInstallerUrl])
-  $DownloadResult = $null
-  if (-not $Installer.Contains('InstallerSha256') -or $HasCachedInstallerFile) {
-    if ($Script:WinGetTempInstallerFiles.Contains($OriginalInstallerUrl) -and (Test-Path -Path $Script:WinGetTempInstallerFiles[$OriginalInstallerUrl])) {
-      # Skip downloading if the installer file is already downloaded
-      $InstallerPath = $Script:WinGetTempInstallerFiles[$OriginalInstallerUrl]
-    } elseif ($InstallerFiles.Contains($OriginalInstallerUrl) -and (Test-Path -Path $InstallerFiles[$OriginalInstallerUrl])) {
-      # Skip downloading if the installer file was previously downloaded
-      $InstallerPath = $InstallerFiles[$OriginalInstallerUrl]
-    } elseif ($Script:WinGetSharedInstallerFiles.Contains($OriginalInstallerUrl) -and (Test-Path -Path $Script:WinGetSharedInstallerFiles[$OriginalInstallerUrl])) {
-      # Skip downloading if the installer file was previously downloaded
-      $InstallerPath = $Script:WinGetSharedInstallerFiles[$OriginalInstallerUrl]
-    } else {
-      $Logger.Invoke("Downloading $($Installer.InstallerUrl)", 'Verbose')
-      $InstallerPath = New-TempFile
-      $DownloadResult = Invoke-WinGetInstallerDownload -Uri $Installer.InstallerUrl -DestinationPath $InstallerPath
-      $Script:WinGetTempInstallerFiles[$OriginalInstallerUrl] = $InstallerPath = $DownloadResult.DestinationPath
-    }
+      $Logger.Invoke('Processing installer data...', 'Verbose')
 
-    $Logger.Invoke('Processing installer data...', 'Verbose')
+      # Get installer SHA256
+      $Artifact = Get-Item -LiteralPath $InstallerPath -ErrorAction Stop
+      $InstallerPath = $Artifact.FullName
+      $ArtifactKey = "$($Artifact.FullName)|$($Artifact.Length)|$($Artifact.CreationTimeUtc.Ticks)|$($Artifact.LastWriteTimeUtc.Ticks)"
+      if (-not $Operation.Hashes.ContainsKey($ArtifactKey)) {
+        $StartedAt = [Diagnostics.Stopwatch]::GetTimestamp()
+        try {
+          $Evidence = $Operation.FileEvidence[$InstallerPath]
+          if ($Evidence -and $Evidence.Sha256 -match '^[a-fA-F0-9]{64}$' -and $Evidence.Identity -ceq $ArtifactKey) {
+            $Operation.Hashes[$ArtifactKey] = $Evidence.Sha256
+          } else { $Operation.Hashes[$ArtifactKey] = (Get-FileHash -LiteralPath $InstallerPath -Algorithm SHA256).Hash }
+        } finally { if ($Operation.Performance) { $Operation.Performance.Record('Hash', $StartedAt) } }
+      }
+      $Installer.InstallerSha256 = $Operation.Hashes[$ArtifactKey]
 
-    # Get installer SHA256
-    $Installer.InstallerSha256 = (Get-FileHash -Path $InstallerPath -Algorithm SHA256).Hash
-
-    # Extract only the selected nested installer instead of expanding a potentially giant ZIP archive.
-    # This extraction exists solely for static analysis and is omitted when the caller opts out.
-    $EffectiveInstallerType = $Installer.Contains('NestedInstallerType') ? $Installer.NestedInstallerType : $Installer.InstallerType
-    $EffectiveInstallerPath = if ($SkipInstallerAnalysis) {
-      $InstallerPath
-    } elseif ($Installer.InstallerType -cin @('zip') -and $Installer.NestedInstallerType -cne 'portable') {
-      $NestedInstallerRelativePath = $Installer.NestedInstallerFiles[0].RelativeFilePath
-      # NestedInstallerFiles contains literal archive paths. Escape wildcard
-      # metacharacters such as architecture tags written as [x64] before
-      # passing the path to the archive selection API.
-      $NestedInstallerPattern = [WildcardPattern]::Escape($NestedInstallerRelativePath)
-      Expand-TempArchive -Path $InstallerPath -Name $NestedInstallerPattern -CollisionAction Rename | Join-Path -ChildPath $NestedInstallerRelativePath
-    } else {
-      $InstallerPath
-    }
-
-    $KnownInstallerTypes = $SkipInstallerAnalysis ? @() : @('msi', 'wix', 'burn', 'nullsoft', 'inno', 'msix', 'appx')
-    if ($EffectiveInstallerType -cin $KnownInstallerTypes) {
-      # The declared parser is authoritative when it succeeds. This avoids
-      # broad generic-family candidates, including structures embedded inside
-      # NSIS/Inno payloads, from overriding a valid outer installer family.
-      $ParserInfo = $null
-      try {
-        $KnownParserArguments = @{
-          Path          = $EffectiveInstallerPath
-          InstallerType = $EffectiveInstallerType
-          Architecture  = $Installer.Architecture
+      # Extract only the selected nested installer instead of expanding a potentially giant ZIP archive.
+      # This extraction exists solely for static analysis and is omitted when the caller opts out.
+      $EffectiveInstallerType = $Installer.Contains('NestedInstallerType') ? $Installer.NestedInstallerType : $Installer.InstallerType
+      $EffectiveInstallerPath = if ($SkipInstallerAnalysis) {
+        $InstallerPath
+      } elseif ($Installer.InstallerType -cin @('zip') -and $Installer.NestedInstallerType -cne 'portable') {
+        $NestedInstallerRelativePath = $Installer.NestedInstallerFiles[0].RelativeFilePath
+        # NestedInstallerFiles contains literal archive paths. Escape wildcard
+        # metacharacters such as architecture tags written as [x64] before
+        # passing the path to the archive selection API.
+        $NestedInstallerPattern = [WildcardPattern]::Escape($NestedInstallerRelativePath)
+        $NestedKey = "$ArtifactKey|$NestedInstallerRelativePath"
+        if (-not $Operation.NestedPaths.ContainsKey($NestedKey)) {
+          $NestedRoot = Expand-TempArchive -Path $InstallerPath -Name $NestedInstallerPattern -CollisionAction Rename
+          $null = $Operation.OwnedDirectories.Add($NestedRoot)
+          $Operation.NestedPaths[$NestedKey] = Join-Path $NestedRoot $NestedInstallerRelativePath
         }
-        # Scope remains author-controlled and is forwarded only when present.
-        # Avoid reading an absent dictionary key under strict mode.
-        if ($Installer.Contains('Scope') -and $Installer.Scope -in @('user', 'machine')) {
-          $KnownParserArguments.Scope = $Installer.Scope
-        }
-        if ($EffectiveInstallerType -ceq 'nullsoft' -and $Installer.Contains('InstallerSwitches') -and
-          $Installer.InstallerSwitches -is [Collections.IDictionary]) {
-          $Switches = $Installer.InstallerSwitches
-          $HasSilentSwitch = $Switches.Contains('Silent') -and -not [string]::IsNullOrWhiteSpace([string]$Switches.Silent)
-          $HasCustomSwitch = $Switches.Contains('Custom') -and -not [string]::IsNullOrWhiteSpace([string]$Switches.Custom)
-          if ($HasSilentSwitch -or $HasCustomSwitch) {
-            # Model the command WinGet uses for silent installation. NSIS /S
-            # is implicit when the manifest only supplies a Custom switch.
-            $SilentSwitch = $HasSilentSwitch ? [string]$Switches.Silent : '/S'
-            $CustomSwitch = $HasCustomSwitch ? [string]$Switches.Custom : ''
-            $KnownParserArguments.CommandLine = ('"' + $EffectiveInstallerPath + '" ' + $SilentSwitch + ' ' + $CustomSwitch).Trim()
+        $Operation.NestedPaths[$NestedKey]
+      } else {
+        $InstallerPath
+      }
+
+      $KnownInstallerTypes = $SkipInstallerAnalysis ? @() : @('msi', 'wix', 'burn', 'nullsoft', 'inno', 'msix', 'appx')
+      if ($EffectiveInstallerType -cin $KnownInstallerTypes) {
+        # The declared parser is authoritative when it succeeds. This avoids
+        # broad generic-family candidates, including structures embedded inside
+        # NSIS/Inno payloads, from overriding a valid outer installer family.
+        $ParserInfo = $null
+        try {
+          $KnownParserArguments = @{
+            Path          = $EffectiveInstallerPath
+            InstallerType = $EffectiveInstallerType
+            Architecture  = $Installer.Architecture
           }
-        }
-        $ParserInfo = Get-WinGetKnownInstallerManifestInfo @KnownParserArguments
-      } catch {
-        $ParserFailure = $_
-        $Analysis = try { Get-WinGetInstallerAnalysis -Path $EffectiveInstallerPath } catch { $null }
-        $FormatEvidence = Get-WinGetDeclaredInstallerFormatEvidence -InstallerType $EffectiveInstallerType -Analysis $Analysis
-        if ($FormatEvidence.Status -ceq 'NotMatched') {
-          $Message = "The manifest-declared '$EffectiveInstallerType' installer was detected as '$($FormatEvidence.DetectedInstallerType)'. $($FormatEvidence.Evidence) Parser error: $($ParserFailure.Exception.Message)"
-          $Diagnostic = New-InstallerDiagnostic -Id 'WinGetManifestUpdate.DeclaredFamilyMismatch' -Source 'WinGetManifestUpdate' -Message $Message -Kind Mismatch -Areas Detection -AffectedFields InstallerType -Evidence $FormatEvidence
-          Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($Diagnostic) -Installer $Installer -InstallerEntry $InstallerEntry -ConfirmedFamily
-          $null = Write-InstallerDiagnostics -Diagnostic @($DiagnosticCollection | Where-Object Id -CEQ $Diagnostic.Id) -Scenario ManifestUpdate -Logger $Logger
-          throw $Message
-        }
-        $AffectedFields = Get-WinGetManifestUpdateAffectedField -Installer $Installer -InstallerEntry $InstallerEntry
-        $Diagnostic = New-InstallerDiagnostic -Id "$($EffectiveInstallerType).ParserIncomplete" -Source 'WinGetManifestUpdate' -Message "$($ParserFailure.Exception.Message) $($FormatEvidence.Evidence) Existing installer fields are preserved." -Kind Incomplete -Areas Detection, Metadata -AffectedFields $AffectedFields
-        Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($Diagnostic) -Installer $Installer -InstallerEntry $InstallerEntry -ConfirmedFamily:($FormatEvidence.Status -ceq 'Matched')
-      }
-
-      if ($ParserInfo) {
-        $DetectedType = [string]$ParserInfo.DetectedInstallerType
-        if (-not [string]::IsNullOrWhiteSpace($DetectedType)) {
-          $Compatible = Test-WinGetInstallerTypeCompatibility -DeclaredInstallerType $EffectiveInstallerType -DetectedInstallerType $DetectedType
-          $ExactPackageTypeRequired = $EffectiveInstallerType -cin @('msix', 'appx')
-          if (-not $Compatible -or ($ExactPackageTypeRequired -and $DetectedType -cne $EffectiveInstallerType)) {
-            $Message = "The manifest-declared '$EffectiveInstallerType' installer was detected as '$DetectedType'"
-            $Diagnostic = New-InstallerDiagnostic -Id 'WinGetManifestUpdate.DeclaredFamilyMismatch' -Source $ParserInfo.ParserName -Message $Message -Kind Mismatch -Areas Detection -AffectedFields InstallerType -Evidence ([ordered]@{ Declared = $EffectiveInstallerType; Detected = $DetectedType })
+          # Scope remains author-controlled and is forwarded only when present.
+          # Avoid reading an absent dictionary key under strict mode.
+          if ($Installer.Contains('Scope') -and $Installer.Scope -in @('user', 'machine')) {
+            $KnownParserArguments.Scope = $Installer.Scope
+          }
+          if ($EffectiveInstallerType -ceq 'nullsoft' -and $Installer.Contains('InstallerSwitches') -and
+            $Installer.InstallerSwitches -is [Collections.IDictionary]) {
+            $Switches = $Installer.InstallerSwitches
+            $HasSilentSwitch = $Switches.Contains('Silent') -and -not [string]::IsNullOrWhiteSpace([string]$Switches.Silent)
+            $HasCustomSwitch = $Switches.Contains('Custom') -and -not [string]::IsNullOrWhiteSpace([string]$Switches.Custom)
+            if ($HasSilentSwitch -or $HasCustomSwitch) {
+              # Model the command WinGet uses for silent installation. NSIS /S
+              # is implicit when the manifest only supplies a Custom switch.
+              $SilentSwitch = $HasSilentSwitch ? [string]$Switches.Silent : '/S'
+              $CustomSwitch = $HasCustomSwitch ? [string]$Switches.Custom : ''
+              $KnownParserArguments.CommandLine = ('"' + $EffectiveInstallerPath + '" ' + $SilentSwitch + ' ' + $CustomSwitch).Trim()
+            }
+          }
+          $ParserInfo = Invoke-WinGetUpdateParser -Context $Operation -Arguments $KnownParserArguments
+        } catch {
+          $ParserFailure = $_
+          $Analysis = try { Get-WinGetInstallerAnalysis -Path $EffectiveInstallerPath } catch { $null }
+          $FormatEvidence = Get-WinGetDeclaredInstallerFormatEvidence -InstallerType $EffectiveInstallerType -Analysis $Analysis
+          if ($FormatEvidence.Status -ceq 'NotMatched') {
+            $Message = "The manifest-declared '$EffectiveInstallerType' installer was detected as '$($FormatEvidence.DetectedInstallerType)'. $($FormatEvidence.Evidence) Parser error: $($ParserFailure.Exception.Message)"
+            $Diagnostic = New-InstallerDiagnostic -Id 'WinGetManifestUpdate.DeclaredFamilyMismatch' -Source 'WinGetManifestUpdate' -Message $Message -Kind Mismatch -Areas Detection -AffectedFields InstallerType -Evidence $FormatEvidence
             Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($Diagnostic) -Installer $Installer -InstallerEntry $InstallerEntry -ConfirmedFamily
             $null = Write-InstallerDiagnostics -Diagnostic @($DiagnosticCollection | Where-Object Id -CEQ $Diagnostic.Id) -Scenario ManifestUpdate -Logger $Logger
             throw $Message
           }
-          if ($DetectedType -cne $EffectiveInstallerType -and $EffectiveInstallerType -cin @('msi', 'wix')) {
-            $Diagnostic = New-InstallerDiagnostic -Id 'WindowsInstaller.DeclaredBuilderRetained' -Source 'Windows Installer' -Message "The Windows Installer parser identified '$DetectedType' while the manifest declares '$EffectiveInstallerType'; the declared type is retained." -Kind Mismatch -Areas Metadata -AffectedFields InstallerType -Evidence ([ordered]@{ Declared = $EffectiveInstallerType; Detected = $DetectedType })
+          $AffectedFields = Get-WinGetManifestUpdateAffectedField -Installer $Installer -InstallerEntry $InstallerEntry
+          $Diagnostic = New-InstallerDiagnostic -Id "$($EffectiveInstallerType).ParserIncomplete" -Source 'WinGetManifestUpdate' -Message "$($ParserFailure.Exception.Message) $($FormatEvidence.Evidence) Existing installer fields are preserved." -Kind Incomplete -Areas Detection, Metadata -AffectedFields $AffectedFields
+          Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($Diagnostic) -Installer $Installer -InstallerEntry $InstallerEntry -ConfirmedFamily:($FormatEvidence.Status -ceq 'Matched')
+        }
+
+        if ($ParserInfo) {
+          $DetectedType = [string]$ParserInfo.DetectedInstallerType
+          if (-not [string]::IsNullOrWhiteSpace($DetectedType)) {
+            $Compatible = Test-WinGetInstallerTypeCompatibility -DeclaredInstallerType $EffectiveInstallerType -DetectedInstallerType $DetectedType
+            $ExactPackageTypeRequired = $EffectiveInstallerType -cin @('msix', 'appx')
+            if (-not $Compatible -or ($ExactPackageTypeRequired -and $DetectedType -cne $EffectiveInstallerType)) {
+              $Message = "The manifest-declared '$EffectiveInstallerType' installer was detected as '$DetectedType'"
+              $Diagnostic = New-InstallerDiagnostic -Id 'WinGetManifestUpdate.DeclaredFamilyMismatch' -Source $ParserInfo.ParserName -Message $Message -Kind Mismatch -Areas Detection -AffectedFields InstallerType -Evidence ([ordered]@{ Declared = $EffectiveInstallerType; Detected = $DetectedType })
+              Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($Diagnostic) -Installer $Installer -InstallerEntry $InstallerEntry -ConfirmedFamily
+              $null = Write-InstallerDiagnostics -Diagnostic @($DiagnosticCollection | Where-Object Id -CEQ $Diagnostic.Id) -Scenario ManifestUpdate -Logger $Logger
+              throw $Message
+            }
+            if ($DetectedType -cne $EffectiveInstallerType -and $EffectiveInstallerType -cin @('msi', 'wix')) {
+              $Diagnostic = New-InstallerDiagnostic -Id 'WindowsInstaller.DeclaredBuilderRetained' -Source 'Windows Installer' -Message "The Windows Installer parser identified '$DetectedType' while the manifest declares '$EffectiveInstallerType'; the declared type is retained." -Kind Mismatch -Areas Metadata -AffectedFields InstallerType -Evidence ([ordered]@{ Declared = $EffectiveInstallerType; Detected = $DetectedType })
+              Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($Diagnostic) -Installer $Installer -InstallerEntry $InstallerEntry -ConfirmedFamily
+            }
+          }
+
+          Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($ParserInfo.Diagnostics) -Installer $Installer -InstallerEntry $InstallerEntry -ConfirmedFamily
+
+          # Apply each resolved value independently. Missing or explicitly
+          # unresolved parser fields warn and retain their existing manifest
+          # values instead of rolling back unrelated metadata updates.
+          $InstallerBackup = $Installer | Copy-Object
+          try {
+            $Metadata = ConvertTo-WinGetInstallerManifestMetadata -InputObject $ParserInfo.InputObject -InstallerType $EffectiveInstallerType -OldInstaller $OldInstaller
+            Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $InstallerEntry -Metadata $Metadata -ParserName $ParserInfo.ParserName -DiagnosticCollection $DiagnosticCollection -ConfirmedFamily
+          } catch {
+            foreach ($Key in @($Installer.Keys)) {
+              if ($Key -ceq 'InstallerSha256') { continue }
+              if ($InstallerBackup.Contains($Key)) { $Installer[$Key] = $InstallerBackup[$Key] } else { $Installer.Remove($Key) }
+            }
+            foreach ($Key in @($InstallerBackup.Keys)) {
+              if ($Key -ceq 'InstallerSha256' -or $Installer.Contains($Key)) { continue }
+              $Installer[$Key] = $InstallerBackup[$Key]
+            }
+            $AffectedFields = Get-WinGetManifestUpdateAffectedField -Installer $Installer -InstallerEntry $InstallerEntry
+            $Diagnostic = New-InstallerDiagnostic -Id "$($ParserInfo.ParserName -replace '[^A-Za-z0-9]+', '.').MetadataApplicationFailed" -Source $ParserInfo.ParserName -Message "Failed to apply $($ParserInfo.ParserName) metadata: $($_.Exception.Message); existing fields are preserved." -Kind Incomplete -Areas Metadata -AffectedFields $AffectedFields
             Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($Diagnostic) -Installer $Installer -InstallerEntry $InstallerEntry -ConfirmedFamily
           }
         }
-
-        Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($ParserInfo.Diagnostics) -Installer $Installer -InstallerEntry $InstallerEntry -ConfirmedFamily
-
-        # Apply each resolved value independently. Missing or explicitly
-        # unresolved parser fields warn and retain their existing manifest
-        # values instead of rolling back unrelated metadata updates.
-        $InstallerBackup = $Installer | Copy-Object
+      } elseif ($EffectiveInstallerType -ceq 'exe' -and -not $SkipInstallerAnalysis) {
+        # Generic EXE families remain best effort because static detection can be
+        # ambiguous and the manifest intentionally does not declare a known type.
         try {
-          $Metadata = ConvertTo-WinGetInstallerManifestMetadata -InputObject $ParserInfo.InputObject -InstallerType $EffectiveInstallerType -OldInstaller $OldInstaller
-          Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $InstallerEntry -Metadata $Metadata -ParserName $ParserInfo.ParserName -DiagnosticCollection $DiagnosticCollection -ConfirmedFamily
+          $ParserInfoArguments = @{
+            Path         = $EffectiveInstallerPath
+            Architecture = $Installer.Architecture
+            Logger       = $Logger
+          }
+          if ($Installer.Contains('InstallerLocale')) { $ParserInfoArguments.InstallerLocale = $Installer.InstallerLocale }
+          $ParserInfo = Invoke-WinGetUpdateParser -Context $Operation -Arguments $ParserInfoArguments -Generic
+          if ($ParserInfo) {
+            Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($ParserInfo.Diagnostics) -Installer $Installer -InstallerEntry $InstallerEntry
+            if (@($ParserInfo.InputObject).Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$ParserInfo.SelectedMsiPath)) {
+              $Logger.Invoke("$($ParserInfo.ParserName) selected MSI '$($ParserInfo.SelectedMsiPath)' using '$($ParserInfo.SelectionMethod)'", 'Verbose')
+            }
+            if (@($ParserInfo.InputObject).Count -gt 0) {
+              $Metadata = ConvertTo-WinGetInstallerManifestMetadata -InputObject $ParserInfo.InputObject -InstallerType $EffectiveInstallerType -OldInstaller $OldInstaller
+              Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $InstallerEntry -Metadata $Metadata -ParserName $ParserInfo.ParserName -DiagnosticCollection $DiagnosticCollection
+            }
+          }
         } catch {
-          foreach ($Key in @($Installer.Keys)) {
-            if ($Key -ceq 'InstallerSha256') { continue }
-            if ($InstallerBackup.Contains($Key)) { $Installer[$Key] = $InstallerBackup[$Key] } else { $Installer.Remove($Key) }
-          }
-          foreach ($Key in @($InstallerBackup.Keys)) {
-            if ($Key -ceq 'InstallerSha256' -or $Installer.Contains($Key)) { continue }
-            $Installer[$Key] = $InstallerBackup[$Key]
-          }
           $AffectedFields = Get-WinGetManifestUpdateAffectedField -Installer $Installer -InstallerEntry $InstallerEntry
-          $Diagnostic = New-InstallerDiagnostic -Id "$($ParserInfo.ParserName -replace '[^A-Za-z0-9]+', '.').MetadataApplicationFailed" -Source $ParserInfo.ParserName -Message "Failed to apply $($ParserInfo.ParserName) metadata: $($_.Exception.Message); existing fields are preserved." -Kind Incomplete -Areas Metadata -AffectedFields $AffectedFields
-          Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($Diagnostic) -Installer $Installer -InstallerEntry $InstallerEntry -ConfirmedFamily
+          $Diagnostic = New-InstallerDiagnostic -Id 'WinGetManifestUpdate.GenericExe.MetadataUpdateFailed' -Source 'WinGetManifestUpdate' -Message "Failed to update generic EXE metadata: $($_.Exception.Message)" -Kind Incomplete -Areas Metadata -AffectedFields $AffectedFields
+          Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($Diagnostic) -Installer $Installer -InstallerEntry $InstallerEntry
         }
       }
-    } elseif ($EffectiveInstallerType -ceq 'exe' -and -not $SkipInstallerAnalysis) {
-      # Generic EXE families remain best effort because static detection can be
-      # ambiguous and the manifest intentionally does not declare a known type.
-      try {
-        $ParserInfoArguments = @{
-          Path         = $EffectiveInstallerPath
-          Architecture = $Installer.Architecture
-          Logger       = $Logger
-        }
-        if ($Installer.Contains('InstallerLocale')) { $ParserInfoArguments.InstallerLocale = $Installer.InstallerLocale }
-        $ParserInfo = Get-WinGetGenericInstallerManifestInfo @ParserInfoArguments
-        if ($ParserInfo) {
-          Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($ParserInfo.Diagnostics) -Installer $Installer -InstallerEntry $InstallerEntry
-          if (@($ParserInfo.InputObject).Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$ParserInfo.SelectedMsiPath)) {
-            $Logger.Invoke("$($ParserInfo.ParserName) selected MSI '$($ParserInfo.SelectedMsiPath)' using '$($ParserInfo.SelectionMethod)'", 'Verbose')
-          }
-          if (@($ParserInfo.InputObject).Count -gt 0) {
-            $Metadata = ConvertTo-WinGetInstallerManifestMetadata -InputObject $ParserInfo.InputObject -InstallerType $EffectiveInstallerType -OldInstaller $OldInstaller
-            Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $InstallerEntry -Metadata $Metadata -ParserName $ParserInfo.ParserName -DiagnosticCollection $DiagnosticCollection
-          }
-        }
-      } catch {
-        $AffectedFields = Get-WinGetManifestUpdateAffectedField -Installer $Installer -InstallerEntry $InstallerEntry
-        $Diagnostic = New-InstallerDiagnostic -Id 'WinGetManifestUpdate.GenericExe.MetadataUpdateFailed' -Source 'WinGetManifestUpdate' -Message "Failed to update generic EXE metadata: $($_.Exception.Message)" -Kind Incomplete -Areas Metadata -AffectedFields $AffectedFields
-        Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($Diagnostic) -Installer $Installer -InstallerEntry $InstallerEntry
+    }
+
+    # Fill the release date from the Last-Modified response header when neither
+    # the existing installer entry nor the task provides one.
+    if (-not $Installer.Contains('ReleaseDate') -and -not $InstallerEntry.Contains('ReleaseDate')) {
+      $ReleaseDate = Get-WinGetInstallerReleaseDate -Uri $OriginalInstallerUrl -DownloadResult $DownloadResult -Logger $Logger
+      if ($ReleaseDate) {
+        $Installer.ReleaseDate = $ReleaseDate
+        $Logger.Invoke("Using the Last-Modified response header as the release date: $ReleaseDate", 'Verbose')
       }
     }
-  }
 
-  # Fill the release date from the Last-Modified response header when neither
-  # the existing installer entry nor the task provides one.
-  if (-not $Installer.Contains('ReleaseDate') -and -not $InstallerEntry.Contains('ReleaseDate')) {
-    $ReleaseDate = Get-WinGetInstallerReleaseDate -Uri $OriginalInstallerUrl -DownloadResult $DownloadResult -Logger $Logger
-    if ($ReleaseDate) {
-      $Installer.ReleaseDate = $ReleaseDate
-      $Logger.Invoke("Using the Last-Modified response header as the release date: $ReleaseDate", 'Verbose')
+    # A parser may remove the final field of a nested value, such as a redundant
+    # AppsAndFeaturesEntries.InstallerType. Do not let structurally empty
+    # dictionaries or arrays survive into YAML as `{}` or `[]` collections.
+    Remove-WinGetEmptyManifestValue -Installer $Installer
+
+    # Beautify entries
+    if ($Installer.Contains('Commands')) { $Installer.Commands = @($Installer.Commands | NoWhitespace | UniqueItems | Sort-Object -Culture $Script:Culture) }
+    if ($Installer.Contains('Protocols')) { $Installer.Protocols = @($Installer.Protocols | ToLower | NoWhitespace | UniqueItems | Sort-Object -Culture $Script:Culture) }
+    if ($Installer.Contains('FileExtensions')) { $Installer.FileExtensions = @($Installer.FileExtensions | ToLower | NoWhitespace | UniqueItems | Sort-Object -Culture $Script:Culture) }
+
+    if ($OwnDiagnosticCollection) {
+      $null = Write-InstallerDiagnostics -Diagnostic $DiagnosticCollection.ToArray() -Scenario ManifestUpdate -Logger $Logger
     }
+
+    return $Installer
+  } finally { if ($OwnOperation) { Close-WinGetManifestUpdateContext $Operation } }
+}
+
+function New-WinGetInstallerEntryIndex {
+  <#
+  .SYNOPSIS
+    Index literal selectors while preserving arbitrary Query evaluation order.
+  .PARAMETER Entries
+    Task-authored installer entries, in their original last-match-wins order.
+  #>
+  param ([Parameter(Mandatory)][Collections.IDictionary[]]$Entries)
+  $Groups = [ordered]@{}
+  $Fallback = [Collections.Generic.List[int]]::new()
+  for ($Ordinal = 0; $Ordinal -lt $Entries.Count; $Ordinal++) {
+    $Entry = $Entries[$Ordinal]
+    $Keys = @('InstallerLocale', 'Architecture', 'InstallerType', 'NestedInstallerType', 'Scope').Where({ $Entry.Contains($_) })
+    # Query scriptblocks can have observable effects; never cache their result or
+    # skip one simply because a later literal entry matches the same installer.
+    if ($Entry.Contains('Query') -or @($Keys.Where({ $Entry[$_] -isnot [string] })).Count) { $Fallback.Add($Ordinal); continue }
+    $Mask = $Keys -join ','
+    if (-not $Groups.Contains($Mask)) {
+      $Groups[$Mask] = @{ Keys = $Keys; Values = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal) }
+    }
+    $Values = @($Keys.ForEach({ $Entry[$_] }))
+    $Key = ConvertTo-Json -InputObject $Values -Compress
+    if (-not $Groups[$Mask].Values.ContainsKey($Key)) { $Groups[$Mask].Values[$Key] = [Collections.Generic.List[int]]::new() }
+    $Groups[$Mask].Values[$Key].Add($Ordinal)
   }
+  return @{ Groups = $Groups; Fallback = $Fallback; Count = $Entries.Count }
+}
 
-  # A parser may remove the final field of a nested value, such as a redundant
-  # AppsAndFeaturesEntries.InstallerType. Do not let structurally empty
-  # dictionaries or arrays survive into YAML as `{}` or `[]` collections.
-  Remove-WinGetEmptyManifestValue -Installer $Installer
-
-  # Beautify entries
-  if ($Installer.Contains('Commands')) { $Installer.Commands = @($Installer.Commands | NoWhitespace | UniqueItems | Sort-Object -Culture $Script:Culture) }
-  if ($Installer.Contains('Protocols')) { $Installer.Protocols = @($Installer.Protocols | ToLower | NoWhitespace | UniqueItems | Sort-Object -Culture $Script:Culture) }
-  if ($Installer.Contains('FileExtensions')) { $Installer.FileExtensions = @($Installer.FileExtensions | ToLower | NoWhitespace | UniqueItems | Sort-Object -Culture $Script:Culture) }
-
-  if ($OwnDiagnosticCollection) {
-    $null = Write-InstallerDiagnostics -Diagnostic $DiagnosticCollection.ToArray() -Scenario ManifestUpdate -Logger $Logger
+function Get-WinGetInstallerEntryCandidate {
+  <#
+  .SYNOPSIS
+    Return potential matching ordinals without changing selector semantics.
+  .PARAMETER Index
+    Operation-local literal selector index.
+  .PARAMETER Installer
+    Effective old installer. Non-string selectors use the original comparison path.
+  #>
+  param ([Parameter(Mandatory)]$Index, [Parameter(Mandatory)][Collections.IDictionary]$Installer)
+  foreach ($Field in 'InstallerLocale', 'Architecture', 'InstallerType', 'NestedInstallerType', 'Scope') {
+    if ($Installer.Contains($Field) -and $Installer[$Field] -isnot [string]) { return 0..($Index.Count - 1) }
   }
-
-  return $Installer
+  $Candidates = [Collections.Generic.List[int]]::new($Index.Fallback)
+  foreach ($Group in $Index.Groups.Values) {
+    if (@($Group.Keys.Where({ -not $Installer.Contains($_) })).Count) { continue }
+    $Values = @($Group.Keys.ForEach({ $Installer[$_] }))
+    $Key = ConvertTo-Json -InputObject $Values -Compress
+    if ($Group.Values.ContainsKey($Key)) { $Candidates.AddRange($Group.Values[$Key]) }
+  }
+  $Candidates | Sort-Object
 }
 
 function Update-WinGetInstallerManifestInstallers {
@@ -1191,113 +1319,116 @@ function Update-WinGetInstallerManifestInstallers {
     [System.Collections.IDictionary]$InstallerFiles,
     [Parameter(HelpMessage = 'Skip nested payload extraction, installer-family detection, and static metadata parsers')]
     [switch]$SkipInstallerAnalysis,
+    [Parameter(DontShow)]$Operation,
     [Parameter(DontShow, HelpMessage = 'The scriptblock or method for logging')]
     [ValidateScript({ Get-Member -InputObject $_ -Name 'Invoke' -MemberType 'Method' })]
     $Logger = { param($Message, $Level) Write-Host $Message }
   )
 
-  # Parser diagnostics are resolved per effective entry, then deduplicated and
-  # rendered once after the complete manifest update.
-  $InstallerLogger = $Logger
-  $InstallerDiagnostics = [System.Collections.Generic.List[object]]::new()
-  $iteration = 0
-  $Installers = @()
-  foreach ($OldInstaller in $OldInstallers) {
-    $iteration += 1
-    $InstallerLogger.Invoke("Updating installer #${iteration}/$($OldInstallers.Count) [$($OldInstaller['InstallerLocale']), $($OldInstaller['Architecture']), $($OldInstaller['InstallerType']), $($OldInstaller['NestedInstallerType']), $($OldInstaller['Scope'])]", 'Verbose')
 
-    # Apply inputs
-    $MatchingInstallerEntry = $null
-    foreach ($InstallerEntry in $InstallerEntries) {
-      $Updatable = $true
-      # Find matching installer entry
-      if ($InstallerEntry.Contains('Query')) {
-        if ($InstallerEntry.Query -is [scriptblock]) {
-          # The installer entry will be chosen if the scriptblock passed with the installer entry returns something
-          if (-not (Invoke-Command -ScriptBlock $InstallerEntry.Query -InputObject $OldInstaller)) {
-            $Updatable = $false
+  $OwnOperation = $null -eq $Operation
+  if ($OwnOperation) { $Operation = New-WinGetManifestUpdateContext }
+  try {
+    # Parser diagnostics are resolved per effective entry, then deduplicated and
+    # rendered once after the complete manifest update.
+    $InstallerLogger = $Logger
+    $InstallerDiagnostics = [System.Collections.Generic.List[object]]::new()
+    $iteration = 0
+    $Installers = [Collections.Generic.List[Collections.IDictionary]]::new()
+    $EntryIndex = New-WinGetInstallerEntryIndex -Entries $InstallerEntries
+    foreach ($OldInstaller in $OldInstallers) {
+      $iteration += 1
+      $InstallerLogger.Invoke("Updating installer #${iteration}/$($OldInstallers.Count) [$($OldInstaller['InstallerLocale']), $($OldInstaller['Architecture']), $($OldInstaller['InstallerType']), $($OldInstaller['NestedInstallerType']), $($OldInstaller['Scope'])]", 'Verbose')
+
+      # Apply inputs
+      $MatchingInstallerEntry = $null
+      foreach ($CandidateOrdinal in (Get-WinGetInstallerEntryCandidate -Index $EntryIndex -Installer $OldInstaller)) {
+        $InstallerEntry = $InstallerEntries[$CandidateOrdinal]
+        $Updatable = $true
+        # Find matching installer entry
+        if ($InstallerEntry.Contains('Query')) {
+          if ($InstallerEntry.Query -is [scriptblock]) {
+            # The installer entry will be chosen if the scriptblock passed with the installer entry returns something
+            if (-not (Invoke-Command -ScriptBlock $InstallerEntry.Query -InputObject $OldInstaller)) {
+              $Updatable = $false
+            }
+          } elseif ($InstallerEntry.Query -is [System.Collections.IDictionary]) {
+            # The installer entry will be chosen if the installer contain all the keys present in the installer entry Query field, and their values are the same
+            foreach ($Key in $InstallerEntry.Query.Keys) {
+              if ($OldInstaller.Contains($Key) -and $OldInstaller.$Key -cne $InstallerEntry.Query.$Key) {
+                # Skip this entry if the installer has this key, but with a different value
+                $Updatable = $false
+              } elseif (-not $OldInstaller.Contains($Key)) {
+                # Skip this entry if the installer doesn't have this key
+                $Updatable = $false
+              }
+            }
+          } else {
+            throw 'The installer entry Query field should be either a scriptblock or a dictionary'
           }
-        } elseif ($InstallerEntry.Query -is [System.Collections.IDictionary]) {
-          # The installer entry will be chosen if the installer contain all the keys present in the installer entry Query field, and their values are the same
-          foreach ($Key in $InstallerEntry.Query.Keys) {
-            if ($OldInstaller.Contains($Key) -and $OldInstaller.$Key -cne $InstallerEntry.Query.$Key) {
+        } else {
+          # The installer entry will be chosen if the installer contain all the keys present in the installer entry, and their values are the same
+          foreach ($Key in @('InstallerLocale', 'Architecture', 'InstallerType', 'NestedInstallerType', 'Scope')) {
+            if ($InstallerEntry.Contains($Key) -and $OldInstaller.Contains($Key) -and $OldInstaller.$Key -cne $InstallerEntry.$Key) {
               # Skip this entry if the installer has this key, but with a different value
               $Updatable = $false
-            } elseif (-not $OldInstaller.Contains($Key)) {
+            } elseif ($InstallerEntry.Contains($Key) -and -not $OldInstaller.Contains($Key)) {
               # Skip this entry if the installer doesn't have this key
               $Updatable = $false
             }
           }
+        }
+        # If the installer entry matches the installer, use the last matching entry for updating the installer
+        if ($Updatable) {
+          $MatchingInstallerEntry = $InstallerEntry
+        }
+      }
+      # If no matching installer entry is found, throw an error
+      if (-not $MatchingInstallerEntry) {
+        throw "No matching installer entry for [$($OldInstaller['InstallerLocale']), $($OldInstaller['Architecture']), $($OldInstaller['InstallerType']), $($OldInstaller['NestedInstallerType']), $($OldInstaller['Scope'])]"
+      }
+
+      # Deep copy the old installer
+      $Installer = $OldInstaller | Copy-Object
+
+      # Clean up volatile fields
+      $Installer.Remove('InstallerSha256')
+      if ($Installer.Contains('ReleaseDate')) { $Installer.Remove('ReleaseDate') }
+
+      # Update the installer using the matching installer entry
+      foreach ($Key in $MatchingInstallerEntry.Keys) {
+        if ($Key -ceq 'Query') {
+          # Skip the entries used for matching
+          continue
+        } elseif (-not $MatchingInstallerEntry.Contains('Query') -and $Key -cin @('InstallerLocale', 'Architecture', 'InstallerType', 'NestedInstallerType', 'Scope')) {
+          # Skip the entries used for matching if Query is not present
+          continue
+        } elseif ($Key -cnotin $Operation.InstallerSchema.definitions.Installer.properties.Keys) {
+          # Check if the key is a valid installer property
+          throw "The installer entry has an invalid key: ${Key}"
         } else {
-          throw 'The installer entry Query field should be either a scriptblock or a dictionary'
-        }
-      } else {
-        # The installer entry will be chosen if the installer contain all the keys present in the installer entry, and their values are the same
-        foreach ($Key in @('InstallerLocale', 'Architecture', 'InstallerType', 'NestedInstallerType', 'Scope')) {
-          if ($InstallerEntry.Contains($Key) -and $OldInstaller.Contains($Key) -and $OldInstaller.$Key -cne $InstallerEntry.$Key) {
-            # Skip this entry if the installer has this key, but with a different value
-            $Updatable = $false
-          } elseif ($InstallerEntry.Contains($Key) -and -not $OldInstaller.Contains($Key)) {
-            # Skip this entry if the installer doesn't have this key
-            $Updatable = $false
+          try {
+            if (-not (Test-YamlObject -InputObject $MatchingInstallerEntry.$Key -Schema $Operation.InstallerSchema.properties.Installers.items.properties.$Key)) {
+              throw "The installer property '${Key}' does not satisfy the manifest schema"
+            }
+            $Installer.$Key = $MatchingInstallerEntry.$Key
+          } catch {
+            $InstallerLogger.Invoke("The new value of the installer property `"${Key}`" is invalid and thus discarded: ${_}", 'Warning')
           }
         }
       }
-      # If the installer entry matches the installer, use the last matching entry for updating the installer
-      if ($Updatable) {
-        $MatchingInstallerEntry = $InstallerEntry
-      }
-    }
-    # If no matching installer entry is found, throw an error
-    if (-not $MatchingInstallerEntry) {
-      throw "No matching installer entry for [$($OldInstaller['InstallerLocale']), $($OldInstaller['Architecture']), $($OldInstaller['InstallerType']), $($OldInstaller['NestedInstallerType']), $($OldInstaller['Scope'])]"
+
+      $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $MatchingInstallerEntry -Operation $Operation -InstallerFiles $InstallerFiles -SkipInstallerAnalysis:$SkipInstallerAnalysis -DiagnosticCollection $InstallerDiagnostics -Logger $InstallerLogger
+
+      # Add the updated installer to the new installers array
+      $Installers.Add($Installer)
     }
 
-    # Deep copy the old installer
-    $Installer = $OldInstaller | Copy-Object
 
-    # Clean up volatile fields
-    $Installer.Remove('InstallerSha256')
-    if ($Installer.Contains('ReleaseDate')) { $Installer.Remove('ReleaseDate') }
+    $null = Write-InstallerDiagnostics -Diagnostic $InstallerDiagnostics.ToArray() -Scenario ManifestUpdate -Logger $Logger
 
-    # Update the installer using the matching installer entry
-    foreach ($Key in $MatchingInstallerEntry.Keys) {
-      if ($Key -ceq 'Query') {
-        # Skip the entries used for matching
-        continue
-      } elseif (-not $MatchingInstallerEntry.Contains('Query') -and $Key -cin @('InstallerLocale', 'Architecture', 'InstallerType', 'NestedInstallerType', 'Scope')) {
-        # Skip the entries used for matching if Query is not present
-        continue
-      } elseif ($Key -cnotin (Get-WinGetManifestSchema -ManifestType 'installer').definitions.Installer.properties.Keys) {
-        # Check if the key is a valid installer property
-        throw "The installer entry has an invalid key: ${Key}"
-      } else {
-        try {
-          if (-not (Test-YamlObject -InputObject $MatchingInstallerEntry.$Key -Schema (Get-WinGetManifestSchema -ManifestType 'installer').properties.Installers.items.properties.$Key)) {
-            throw "The installer property '${Key}' does not satisfy the manifest schema"
-          }
-          $Installer.$Key = $MatchingInstallerEntry.$Key
-        } catch {
-          $InstallerLogger.Invoke("The new value of the installer property `"${Key}`" is invalid and thus discarded: ${_}", 'Warning')
-        }
-      }
-    }
-
-    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $MatchingInstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles -SkipInstallerAnalysis:$SkipInstallerAnalysis -DiagnosticCollection $InstallerDiagnostics -Logger $InstallerLogger
-
-    # Add the updated installer to the new installers array
-    $Installers += $Installer
-  }
-
-  # Remove the downloaded files
-  foreach ($InstallerPath in $Script:WinGetTempInstallerFiles.Values) {
-    Remove-Item -Path $InstallerPath -Force -ErrorAction 'Continue'
-  }
-  $Script:WinGetTempInstallerFiles.Clear()
-
-  $null = Write-InstallerDiagnostics -Diagnostic $InstallerDiagnostics.ToArray() -Scenario ManifestUpdate -Logger $Logger
-
-  return $Installers
+    return $Installers
+  } finally { if ($OwnOperation) { Close-WinGetManifestUpdateContext $Operation } }
 }
 
 function Set-WinGetInstallerManifestInstallers {
@@ -1322,98 +1453,99 @@ function Set-WinGetInstallerManifestInstallers {
     [System.Collections.IDictionary]$InstallerFiles,
     [Parameter(HelpMessage = 'Skip nested payload extraction, installer-family detection, and static metadata parsers')]
     [switch]$SkipInstallerAnalysis,
+    [Parameter(DontShow)]$Operation,
     [Parameter(DontShow, HelpMessage = 'The scriptblock or method for logging')]
     [ValidateScript({ Get-Member -InputObject $_ -Name 'Invoke' -MemberType 'Method' })]
     $Logger = { param($Message, $Level) Write-Host $Message }
   )
 
-  $InstallerLogger = $Logger
-  $InstallerDiagnostics = [System.Collections.Generic.List[object]]::new()
-  $iteration = 0
-  $Installers = @()
-  foreach ($InstallerEntry in $InstallerEntries) {
-    $iteration += 1
-    $InstallerLogger.Invoke("Applying installer entry #${iteration}/$($InstallerEntries.Count)", 'Verbose')
 
-    # Find matching installer
-    $MatchingInstaller = $null
-    foreach ($OldInstaller in $OldInstallers) {
-      $Updatable = $true
-      # If Query is present, select the installer based on the query. If not, select the first installer
-      if ($InstallerEntry.Contains('Query')) {
-        # The installer will be chosen if the scriptblock passed with the installer returns something
-        if ($InstallerEntry.Query -is [scriptblock]) {
-          if (-not (Invoke-Command -ScriptBlock $InstallerEntry.Query -InputObject $OldInstaller)) {
-            $Updatable = $false
-          }
-        } elseif ($InstallerEntry.Query -is [System.Collections.IDictionary]) {
-          # The installer will be chosen if the installer contain all the keys present in the installer entry Query field, and their values are the same
-          foreach ($Key in $InstallerEntry.Query.Keys) {
-            if ($OldInstaller.Contains($Key) -and $OldInstaller.$Key -cne $InstallerEntry.Query.$Key) {
-              # Skip this entry if the installer has this key, but with a different value
-              $Updatable = $false
-            } elseif (-not $OldInstaller.Contains($Key)) {
-              # Skip this entry if the installer doesn't have this key
+  $OwnOperation = $null -eq $Operation
+  if ($OwnOperation) { $Operation = New-WinGetManifestUpdateContext }
+  try {
+    $InstallerLogger = $Logger
+    $InstallerDiagnostics = [System.Collections.Generic.List[object]]::new()
+    $iteration = 0
+    $Installers = [Collections.Generic.List[Collections.IDictionary]]::new()
+    foreach ($InstallerEntry in $InstallerEntries) {
+      $iteration += 1
+      $InstallerLogger.Invoke("Applying installer entry #${iteration}/$($InstallerEntries.Count)", 'Verbose')
+
+      # Find matching installer
+      $MatchingInstaller = $null
+      foreach ($OldInstaller in $OldInstallers) {
+        $Updatable = $true
+        # If Query is present, select the installer based on the query. If not, select the first installer
+        if ($InstallerEntry.Contains('Query')) {
+          # The installer will be chosen if the scriptblock passed with the installer returns something
+          if ($InstallerEntry.Query -is [scriptblock]) {
+            if (-not (Invoke-Command -ScriptBlock $InstallerEntry.Query -InputObject $OldInstaller)) {
               $Updatable = $false
             }
+          } elseif ($InstallerEntry.Query -is [System.Collections.IDictionary]) {
+            # The installer will be chosen if the installer contain all the keys present in the installer entry Query field, and their values are the same
+            foreach ($Key in $InstallerEntry.Query.Keys) {
+              if ($OldInstaller.Contains($Key) -and $OldInstaller.$Key -cne $InstallerEntry.Query.$Key) {
+                # Skip this entry if the installer has this key, but with a different value
+                $Updatable = $false
+              } elseif (-not $OldInstaller.Contains($Key)) {
+                # Skip this entry if the installer doesn't have this key
+                $Updatable = $false
+              }
+            }
+          } else {
+            throw 'The installer entry Query field should be either a scriptblock or a dictionary'
           }
+        }
+        # If the installer entry matches the installers, use the first matching installer for updating
+        if ($Updatable) {
+          $MatchingInstaller = $OldInstaller
+          break
+        }
+      }
+      # If no matching installer entry is found, throw an error
+      if (-not $MatchingInstaller) {
+        throw 'No matching installer for the installer entry'
+      }
+
+      # Deep copy the old installer
+      $Installer = $MatchingInstaller | Copy-Object
+
+      # Clean up volatile fields
+      $Installer.Remove('InstallerSha256')
+      if ($Installer.Contains('ReleaseDate')) { $Installer.Remove('ReleaseDate') }
+
+      # Update the installer using the matching installer entry
+      foreach ($Key in $InstallerEntry.Keys) {
+        if ($Key -ceq 'Query') {
+          # Skip the entries used for matching
+          continue
+        } elseif ($Key -cnotin $Operation.InstallerSchema.definitions.Installer.properties.Keys) {
+          # Check if the key is a valid installer property
+          throw "The installer entry has an invalid key: ${Key}"
         } else {
-          throw 'The installer entry Query field should be either a scriptblock or a dictionary'
-        }
-      }
-      # If the installer entry matches the installers, use the first matching installer for updating
-      if ($Updatable) {
-        $MatchingInstaller = $OldInstaller
-        break
-      }
-    }
-    # If no matching installer entry is found, throw an error
-    if (-not $MatchingInstaller) {
-      throw 'No matching installer for the installer entry'
-    }
-
-    # Deep copy the old installer
-    $Installer = $MatchingInstaller | Copy-Object
-
-    # Clean up volatile fields
-    $Installer.Remove('InstallerSha256')
-    if ($Installer.Contains('ReleaseDate')) { $Installer.Remove('ReleaseDate') }
-
-    # Update the installer using the matching installer entry
-    foreach ($Key in $InstallerEntry.Keys) {
-      if ($Key -ceq 'Query') {
-        # Skip the entries used for matching
-        continue
-      } elseif ($Key -cnotin (Get-WinGetManifestSchema -ManifestType 'installer').definitions.Installer.properties.Keys) {
-        # Check if the key is a valid installer property
-        throw "The installer entry has an invalid key: ${Key}"
-      } else {
-        try {
-          if (-not (Test-YamlObject -InputObject $InstallerEntry.$Key -Schema (Get-WinGetManifestSchema -ManifestType 'installer').properties.Installers.items.properties.$Key)) {
-            throw "The installer property '${Key}' does not satisfy the manifest schema"
+          try {
+            if (-not (Test-YamlObject -InputObject $InstallerEntry.$Key -Schema $Operation.InstallerSchema.properties.Installers.items.properties.$Key)) {
+              throw "The installer property '${Key}' does not satisfy the manifest schema"
+            }
+            $Installer.$Key = $InstallerEntry.$Key
+          } catch {
+            $InstallerLogger.Invoke("The new value of the installer property `"${Key}`" is invalid and thus discarded: ${_}", 'Warning')
           }
-          $Installer.$Key = $InstallerEntry.$Key
-        } catch {
-          $InstallerLogger.Invoke("The new value of the installer property `"${Key}`" is invalid and thus discarded: ${_}", 'Warning')
         }
       }
+
+      $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $MatchingInstaller -InstallerEntry $InstallerEntry -Operation $Operation -InstallerFiles $InstallerFiles -SkipInstallerAnalysis:$SkipInstallerAnalysis -DiagnosticCollection $InstallerDiagnostics -Logger $InstallerLogger
+
+      # Add the updated installer to the new installers array
+      $Installers.Add($Installer)
     }
 
-    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $MatchingInstaller -InstallerEntry $InstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles -SkipInstallerAnalysis:$SkipInstallerAnalysis -DiagnosticCollection $InstallerDiagnostics -Logger $InstallerLogger
 
-    # Add the updated installer to the new installers array
-    $Installers += $Installer
-  }
+    $null = Write-InstallerDiagnostics -Diagnostic $InstallerDiagnostics.ToArray() -Scenario ManifestUpdate -Logger $Logger
 
-  # Remove the downloaded files
-  foreach ($InstallerPath in $Script:WinGetTempInstallerFiles.Values) {
-    Remove-Item -Path $InstallerPath -Force -ErrorAction 'Continue'
-  }
-  $Script:WinGetTempInstallerFiles.Clear()
-
-  $null = Write-InstallerDiagnostics -Diagnostic $InstallerDiagnostics.ToArray() -Scenario ManifestUpdate -Logger $Logger
-
-  return $Installers
+    return $Installers
+  } finally { if ($OwnOperation) { Close-WinGetManifestUpdateContext $Operation } }
 }
 
 function Update-WinGetLocaleManifest {
@@ -1527,6 +1659,9 @@ function Update-WinGetManifest {
     Dumplings locale update entries.
   .PARAMETER InstallerFiles
     Already downloaded installer files keyed by installer URL.
+  .PARAMETER InstallerFileEvidence
+    Trusted in-process tracking hashes keyed by absolute path and guarded by file
+    identity. Never populate this dictionary from an untrusted manifest or state.
   .PARAMETER ReplaceInstallers
     Replace instead of matching and updating existing installer entries.
   .PARAMETER SkipInstallerAnalysis
@@ -1542,68 +1677,78 @@ function Update-WinGetManifest {
     [Parameter(Mandatory)][System.Collections.IDictionary[]]$InstallerEntries,
     [System.Collections.IDictionary[]]$LocaleEntries = @(),
     [System.Collections.IDictionary]$InstallerFiles = @{},
+    [System.Collections.IDictionary]$InstallerFileEvidence = @{},
     [switch]$ReplaceInstallers,
     [switch]$SkipInstallerAnalysis,
     [ValidateScript({ Get-Member -InputObject $_ -Name 'Invoke' -MemberType Method })]
     $Logger = { param($Message, $Level) Write-Host $Message }
   )
 
-  $PackageIdentifier = [string]::IsNullOrWhiteSpace($NewPackageIdentifier) ? [string]$Manifest.PackageIdentifier : $NewPackageIdentifier
-  $OldInstallers = [System.Collections.IDictionary[]]@($Manifest.Installers | ForEach-Object { Copy-WinGetManifestValue -Value $_ })
-  if ($ReplaceInstallers) {
-    $UpdatedInstallers = @(Set-WinGetInstallerManifestInstallers -OldInstallers $OldInstallers -InstallerEntries $InstallerEntries -InstallerFiles $InstallerFiles -SkipInstallerAnalysis:$SkipInstallerAnalysis -Logger $Logger)
-  } else {
-    $UpdatedInstallers = @(Update-WinGetInstallerManifestInstallers -OldInstallers $OldInstallers -InstallerEntries $InstallerEntries -InstallerFiles $InstallerFiles -SkipInstallerAnalysis:$SkipInstallerAnalysis -Logger $Logger)
-  }
 
-  # Locale update behavior is retained, but identity/document fields are added
-  # only for that operation and removed again before storing logical locale data.
-  $LocaleDocuments = [System.Collections.Generic.List[object]]::new()
-  $DefaultLocaleDocument = [ordered]@{
-    PackageIdentifier = $PackageIdentifier
-    PackageVersion    = $PackageVersion
-  }
-  foreach ($Key in $Manifest.DefaultLocalization.Keys) {
-    $DefaultLocaleDocument[$Key] = Copy-WinGetManifestValue -Value $Manifest.DefaultLocalization[$Key]
-  }
-  $DefaultLocaleDocument['ManifestType'] = 'defaultLocale'
-  $DefaultLocaleDocument['ManifestVersion'] = $Script:WinGetAuthoringManifestVersion
-  $LocaleDocuments.Add($DefaultLocaleDocument)
-  foreach ($Localization in @($Manifest.Localizations)) {
-    $LocaleDocument = [ordered]@{
+  $Operation = New-WinGetManifestUpdateContext
+  $Operation.FileEvidence = $InstallerFileEvidence
+  $StartedAt = [Diagnostics.Stopwatch]::GetTimestamp()
+  try {
+    $PackageIdentifier = [string]::IsNullOrWhiteSpace($NewPackageIdentifier) ? [string]$Manifest.PackageIdentifier : $NewPackageIdentifier
+    $OldInstallers = [System.Collections.IDictionary[]]@($Manifest.Installers | ForEach-Object { Copy-Object -Value $_ })
+    if ($ReplaceInstallers) {
+      $UpdatedInstallers = @(Set-WinGetInstallerManifestInstallers -OldInstallers $OldInstallers -InstallerEntries $InstallerEntries -InstallerFiles $InstallerFiles -Operation $Operation -SkipInstallerAnalysis:$SkipInstallerAnalysis -Logger $Logger)
+    } else {
+      $UpdatedInstallers = @(Update-WinGetInstallerManifestInstallers -OldInstallers $OldInstallers -InstallerEntries $InstallerEntries -InstallerFiles $InstallerFiles -Operation $Operation -SkipInstallerAnalysis:$SkipInstallerAnalysis -Logger $Logger)
+    }
+
+    # Locale update behavior is retained, but identity/document fields are added
+    # only for that operation and removed again before storing logical locale data.
+    $LocaleDocuments = [System.Collections.Generic.List[object]]::new()
+    $DefaultLocaleDocument = [ordered]@{
       PackageIdentifier = $PackageIdentifier
       PackageVersion    = $PackageVersion
     }
-    foreach ($Key in $Localization.Keys) { $LocaleDocument[$Key] = Copy-WinGetManifestValue -Value $Localization[$Key] }
-    $LocaleDocument['ManifestType'] = 'locale'
-    $LocaleDocument['ManifestVersion'] = $Script:WinGetAuthoringManifestVersion
-    $LocaleDocuments.Add($LocaleDocument)
-  }
-  $UpdatedLocaleDocuments = @(Update-WinGetLocaleManifest -OldLocaleManifests ([System.Collections.IDictionary[]]$LocaleDocuments.ToArray()) -LocaleEntries $LocaleEntries -PackageVersion $PackageVersion -Logger $Logger)
+    foreach ($Key in $Manifest.DefaultLocalization.Keys) {
+      $DefaultLocaleDocument[$Key] = Copy-Object -Value $Manifest.DefaultLocalization[$Key]
+    }
+    $DefaultLocaleDocument['ManifestType'] = 'defaultLocale'
+    $DefaultLocaleDocument['ManifestVersion'] = $Script:WinGetAuthoringManifestVersion
+    $LocaleDocuments.Add($DefaultLocaleDocument)
+    foreach ($Localization in @($Manifest.Localizations)) {
+      $LocaleDocument = [ordered]@{
+        PackageIdentifier = $PackageIdentifier
+        PackageVersion    = $PackageVersion
+      }
+      foreach ($Key in $Localization.Keys) { $LocaleDocument[$Key] = Copy-Object -Value $Localization[$Key] }
+      $LocaleDocument['ManifestType'] = 'locale'
+      $LocaleDocument['ManifestVersion'] = $Script:WinGetAuthoringManifestVersion
+      $LocaleDocuments.Add($LocaleDocument)
+    }
+    $UpdatedLocaleDocuments = @(Update-WinGetLocaleManifest -OldLocaleManifests ([System.Collections.IDictionary[]]$LocaleDocuments.ToArray()) -LocaleEntries $LocaleEntries -PackageVersion $PackageVersion -Logger $Logger)
 
-  $DefaultLocalization = [ordered]@{}
-  $Localizations = [System.Collections.Generic.List[object]]::new()
-  foreach ($LocaleDocument in $UpdatedLocaleDocuments) {
-    $Localization = [ordered]@{}
-    foreach ($Key in $LocaleDocument.Keys) {
-      if ($Key -cnotin @('PackageIdentifier', 'PackageVersion', 'ManifestType', 'ManifestVersion')) {
-        $Localization[$Key] = Copy-WinGetManifestValue -Value $LocaleDocument[$Key]
+    $DefaultLocalization = [ordered]@{}
+    $Localizations = [System.Collections.Generic.List[object]]::new()
+    foreach ($LocaleDocument in $UpdatedLocaleDocuments) {
+      $Localization = [ordered]@{}
+      foreach ($Key in $LocaleDocument.Keys) {
+        if ($Key -cnotin @('PackageIdentifier', 'PackageVersion', 'ManifestType', 'ManifestVersion')) {
+          $Localization[$Key] = Copy-Object -Value $LocaleDocument[$Key]
+        }
+      }
+      if ([string]$LocaleDocument['ManifestType'] -ceq 'defaultLocale') {
+        $DefaultLocalization = $Localization
+      } else {
+        $Localizations.Add($Localization)
       }
     }
-    if ([string]$LocaleDocument['ManifestType'] -ceq 'defaultLocale') {
-      $DefaultLocalization = $Localization
-    } else {
-      $Localizations.Add($Localization)
-    }
-  }
 
-  $UpdatedModel = New-WinGetManifestModel -PackageIdentifier $PackageIdentifier -PackageVersion $PackageVersion -Channel ([string]$Manifest.Channel) -Moniker ([string]$Manifest.Moniker) -ManifestVersion $Script:WinGetAuthoringManifestVersion -InstallerDefaults ([ordered]@{}) -Installers ([System.Collections.IDictionary[]]$UpdatedInstallers) -DefaultLocalization $DefaultLocalization -Localizations ([System.Collections.IDictionary[]]$Localizations.ToArray()) -SourceFormat Memory
-  # Return the same post-processed authored state that serialization emits so
-  # task callers do not observe redundant locale or ARP fields temporarily.
-  $UpdatedModel = Optimize-WinGetManifest -Manifest $UpdatedModel
-  $Compacted = Get-WinGetManifestCompactedInstallerData -Manifest $UpdatedModel
-  $UpdatedModel.InstallerDefaults = $Compacted.Defaults
-  return $UpdatedModel
+    $UpdatedModel = New-WinGetManifestModel -PackageIdentifier $PackageIdentifier -PackageVersion $PackageVersion -Channel ([string]$Manifest.Channel) -Moniker ([string]$Manifest.Moniker) -ManifestVersion $Script:WinGetAuthoringManifestVersion -InstallerDefaults ([ordered]@{}) -Installers ([System.Collections.IDictionary[]]$UpdatedInstallers) -DefaultLocalization $DefaultLocalization -Localizations ([System.Collections.IDictionary[]]$Localizations.ToArray()) -SourceFormat Memory
+    # Return the same post-processed authored state that serialization emits so
+    # task callers do not observe redundant locale or ARP fields temporarily.
+    $UpdatedModel = Optimize-WinGetManifest -Manifest $UpdatedModel
+    $Compacted = Get-WinGetManifestCompactedInstallerData -Manifest $UpdatedModel
+    $UpdatedModel.InstallerDefaults = $Compacted.Defaults
+    return $UpdatedModel
+  } finally {
+    Close-WinGetManifestUpdateContext $Operation
+    if ($Operation.Performance) { $Operation.Performance.Record('Manifest', $StartedAt) }
+  }
 }
 
 Export-ModuleMember -Function Update-WinGetManifest -Variable 'WinGetUserAgent', 'WinGetBackupUserAgent', 'WinGetInstallerFiles'

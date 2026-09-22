@@ -582,7 +582,11 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
     }
 
     It 'Uses NestedInstallerType when deciding whether to materialize an AppsAndFeaturesEntries type' {
-      Mock Expand-TempArchive { $TestDrive }
+      Mock Expand-TempArchive {
+        $Root = (New-Item -Path (Join-Path $TestDrive 'nested-extraction') -ItemType Directory -Force).FullName
+        [IO.File]::WriteAllBytes((Join-Path $Root 'nested.msi'), [byte[]](1, 2, 3, 4))
+        $Root
+      }
       Mock Get-MsiInstallerInfo {
         [pscustomobject]@{
           ProductCode                  = '{NEW-NESTED-WIX-PRODUCT}'

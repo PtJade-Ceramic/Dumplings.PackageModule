@@ -4,6 +4,64 @@
 
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
+function Get-DictionaryValue {
+  <#
+  .SYNOPSIS
+    Read the first present dictionary key, preserving null, false, and empty values.
+  .PARAMETER Dictionary
+    Optional dictionary. Key comparison uses the dictionary's own comparer.
+  .PARAMETER Name
+    Candidate keys in precedence order. Later keys are considered only when earlier keys are absent.
+  .OUTPUTS
+    The selected value, or null if the dictionary or all candidate keys are absent.
+  #>
+  param (
+    [AllowNull()][Collections.IDictionary]$Dictionary,
+    [Parameter(Mandatory)][string[]]$Name
+  )
+  if ($null -eq $Dictionary) { return $null }
+  foreach ($Candidate in $Name) {
+    if ($Dictionary.Contains($Candidate)) { return $Dictionary[$Candidate] }
+  }
+  return $null
+}
+
+function Read-BoundedXmlDocument {
+  <#
+  .SYNOPSIS
+    Parse untrusted XML with an explicit size limit and no external resources.
+  .PARAMETER Content
+    Raw XML text passed directly to the XML reader without a text-formatting preprocessing step.
+  .PARAMETER MaximumCharacters
+    Maximum XML document length in characters, including markup.
+  .OUTPUTS
+    An XmlDocument with DTDs prohibited and external resolution disabled.
+  #>
+  [OutputType([xml])]
+  [CmdletBinding()]
+  param (
+    [Parameter(Mandatory)][AllowEmptyString()][string]$Content,
+    [Parameter(Mandatory)][ValidateRange(1, [long]::MaxValue)][long]$MaximumCharacters
+  )
+
+  $Settings = [Xml.XmlReaderSettings]::new()
+  $Settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+  $Settings.XmlResolver = $null
+  $Settings.MaxCharactersInDocument = $MaximumCharacters
+  $TextReader = [IO.StringReader]::new($Content)
+  $Reader = $null
+  try {
+    $Reader = [Xml.XmlReader]::Create($TextReader, $Settings)
+    $Document = [Xml.XmlDocument]::new()
+    $Document.XmlResolver = $null
+    $Document.Load($Reader)
+    return , $Document
+  } finally {
+    if ($Reader) { $Reader.Dispose() }
+    $TextReader.Dispose()
+  }
+}
+
 function ConvertFrom-Xml {
   <#
   .SYNOPSIS
@@ -183,4 +241,4 @@ function ConvertFrom-Ini {
   }
 }
 
-Export-ModuleMember -Function ConvertFrom-Xml, ConvertFrom-Ini
+Export-ModuleMember -Function ConvertFrom-Xml, ConvertFrom-Ini, Read-BoundedXmlDocument, Get-DictionaryValue

@@ -87,27 +87,6 @@ $Script:ActualInstallerExitCodeEvidence = [ordered]@{
   100 = 'The setup file could not be opened because access was denied'
 }
 
-function Get-ActualInstallerDictionaryValue {
-  <#
-  .SYNOPSIS
-    Read the first present key from a case-insensitive INI section.
-  .PARAMETER Dictionary
-    INI section or other dictionary. Null is accepted.
-  .PARAMETER Name
-    Candidate keys in precedence order.
-  #>
-  param (
-    [AllowNull()][Collections.IDictionary]$Dictionary,
-    [Parameter(Mandatory)][string[]]$Name
-  )
-
-  if ($null -eq $Dictionary) { return $null }
-  foreach ($Candidate in $Name) {
-    if ($Dictionary.Contains($Candidate)) { return $Dictionary[$Candidate] }
-  }
-  return $null
-}
-
 function Test-ActualInstallerBooleanValue {
   <#
   .SYNOPSIS
@@ -166,12 +145,12 @@ function Get-ActualInstallerSetupParameterInfo {
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)][Collections.IDictionary]$Setup)
 
-  $Raw = [string](Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('SetupParameters'))
+  $Raw = [string](Get-DictionaryValue -Dictionary $Setup -Name @('SetupParameters'))
   $Tokens = [Collections.Generic.List[string]]::new()
   foreach ($Match in [regex]::Matches($Raw, '(?:^|\s)(?<Token>-[^\s]+)')) { $Tokens.Add($Match.Groups['Token'].Value) }
   $TokenSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
   foreach ($Token in $Tokens) { $null = $TokenSet.Add($Token) }
-  $HasUserInformationDialog = Test-ActualInstallerBooleanValue -Value (Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('DialogUserInfo'))
+  $HasUserInformationDialog = Test-ActualInstallerBooleanValue -Value (Get-DictionaryValue -Dictionary $Setup -Name @('DialogUserInfo'))
   $AllowsSilent = -not $TokenSet.Contains('-nosilent') -and (-not $HasUserInformationDialog -or $TokenSet.Contains('-silentinstalluserinfo'))
 
   [pscustomobject]@{
@@ -266,24 +245,24 @@ function Get-ActualInstallerRequirementInfo {
       @('SQL', 'SQLVersion', 'SQL Server'),
       @('SQLE', 'SQLEVersion', 'SQL Server Express')
     )) {
-    if (Test-ActualInstallerBooleanValue -Value (Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @($Definition[0]))) {
-      $Prerequisites.Add([pscustomobject]@{ Id = $Definition[0]; Name = $Definition[2]; Version = [string](Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @($Definition[1])) })
+    if (Test-ActualInstallerBooleanValue -Value (Get-DictionaryValue -Dictionary $Setup -Name @($Definition[0]))) {
+      $Prerequisites.Add([pscustomobject]@{ Id = $Definition[0]; Name = $Definition[2]; Version = [string](Get-DictionaryValue -Dictionary $Setup -Name @($Definition[1])) })
     }
   }
   $CloseApplications = [Collections.Generic.List[object]]::new()
   foreach ($Suffix in '', '2') {
-    if (Test-ActualInstallerBooleanValue -Value (Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @("CloseApp$Suffix"))) {
-      $CloseApplications.Add([pscustomobject]@{ File = [string](Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @("CloseAppFile$Suffix")); Description = [string](Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @("CloseAppText$Suffix")) })
+    if (Test-ActualInstallerBooleanValue -Value (Get-DictionaryValue -Dictionary $Setup -Name @("CloseApp$Suffix"))) {
+      $CloseApplications.Add([pscustomobject]@{ File = [string](Get-DictionaryValue -Dictionary $Setup -Name @("CloseAppFile$Suffix")); Description = [string](Get-DictionaryValue -Dictionary $Setup -Name @("CloseAppText$Suffix")) })
     }
   }
   [pscustomobject]@{
     AllowedWindows          = @($AllowedWindows | Sort-Object -Unique)
-    RequiresInternet        = Test-ActualInstallerBooleanValue -Value (Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('Internet'))
+    RequiresInternet        = Test-ActualInstallerBooleanValue -Value (Get-DictionaryValue -Dictionary $Setup -Name @('Internet'))
     Prerequisites           = $Prerequisites.ToArray()
     CloseApplications       = $CloseApplications.ToArray()
-    ChecksInstalledVersion  = Test-ActualInstallerBooleanValue -Value (Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('CheckVersions'))
-    MinimumInstalledVersion = Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('CheckMinVer')
-    MaximumInstalledVersion = Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('CheckMaxVer')
+    ChecksInstalledVersion  = Test-ActualInstallerBooleanValue -Value (Get-DictionaryValue -Dictionary $Setup -Name @('CheckVersions'))
+    MinimumInstalledVersion = Get-DictionaryValue -Dictionary $Setup -Name @('CheckMinVer')
+    MaximumInstalledVersion = Get-DictionaryValue -Dictionary $Setup -Name @('CheckMaxVer')
   }
 }
 
@@ -305,7 +284,7 @@ function Get-ActualInstallerMediaInfo {
     [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Variables
   )
 
-  $DataFileName = [string](Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('DataFileName'))
+  $DataFileName = [string](Get-DictionaryValue -Dictionary $Setup -Name @('DataFileName'))
   $ExternalDownloads = @($Commands | Where-Object File -Match '^(?i:DOWNLOAD:)' | ForEach-Object { [pscustomobject]@{ Url = $_.File.Substring(9); Destination = $_.Parameters; Timing = $_.Timing; CommandIndex = $_.Index } })
   $ExternalArchivePlans = [Collections.Generic.List[object]]::new()
   foreach ($Command in $Commands) {
@@ -340,8 +319,8 @@ function Get-ActualInstallerMediaInfo {
     CompanionDataFile            = [string]::IsNullOrWhiteSpace($DataFileName) ? $null : $DataFileName
     CompanionArchiveFormat       = [string]::IsNullOrWhiteSpace($DataFileName) ? $null : '7z/LZMA'
     CompanionExtractionSupported = -not [string]::IsNullOrWhiteSpace($DataFileName)
-    PackageType                  = Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('PackageType')
-    ArchiveMode                  = Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('Archive')
+    PackageType                  = Get-DictionaryValue -Dictionary $Setup -Name @('PackageType')
+    ArchiveMode                  = Get-DictionaryValue -Dictionary $Setup -Name @('Archive')
     ExternalDownloads            = $ExternalDownloads
     ExternalArchivePlans         = $ExternalArchivePlans.ToArray()
     DynamicSources               = $DynamicSources
@@ -364,21 +343,7 @@ function ConvertFrom-ActualInstallerConfigurationBuffer {
 
   $Stream = [IO.MemoryStream]::new($Bytes, $false)
   try {
-    $Encoding = Get-BomlessUnicodeTextEncoding -Stream $Stream
-    if (-not $Encoding) { $Encoding = [Text.UTF8Encoding]::new($false, $true) }
-    $Reader = [IO.StreamReader]::new($Stream, $Encoding, $true, 4096, $true)
-    try {
-      try {
-        $Content = $Reader.ReadToEnd()
-      } catch [Text.DecoderFallbackException] {
-        $Reader.Dispose()
-        $Stream.Position = 0
-        $Reader = [IO.StreamReader]::new($Stream, [Text.Encoding]::Default, $true, 4096, $true)
-        $Content = $Reader.ReadToEnd()
-      }
-    } finally {
-      $Reader.Dispose()
-    }
+    $Content = Read-BoundedTextStream -Stream $Stream -MaximumBytes $Script:ActualInstallerMaximumConfigurationBytes -DetectBomlessUnicode -AllowUnicodeFallback
   } finally {
     $Stream.Dispose()
   }
@@ -716,7 +681,7 @@ function Resolve-ActualInstallerLiteralExpression {
       @('MainExe', @('MainExe', 'MainExecutable')),
       @('MainExecutable', @('MainExecutable', 'MainExe'))
     )) {
-    $Resolved = [string](Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name $Pair[1])
+    $Resolved = [string](Get-DictionaryValue -Dictionary $Setup -Name $Pair[1])
     if (-not [string]::IsNullOrWhiteSpace($Resolved) -and $Resolved -notmatch '^<[^>]+>$') { $Variables[$Pair[0]] = $Resolved }
   }
   if ($Variables.ContainsKey('AppName') -and $Variables.ContainsKey('AppVersion')) { $Variables['AppNameVersion'] = "$($Variables['AppName']) $($Variables['AppVersion'])" }
@@ -791,7 +756,7 @@ function Get-ActualInstallerScopeInfo {
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)][Collections.IDictionary]$Setup, [AllowNull()][string]$RequestedExecutionLevel)
 
-  $RawInstallLevel = Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('InstallLevel')
+  $RawInstallLevel = Get-DictionaryValue -Dictionary $Setup -Name @('InstallLevel')
   [int]$InstallLevel = -1
   $HasInstallLevel = $null -ne $RawInstallLevel -and [int]::TryParse([string]$RawInstallLevel, [ref]$InstallLevel) -and $InstallLevel -in 0..3
   if ($HasInstallLevel) {
@@ -803,7 +768,7 @@ function Get-ActualInstallerScopeInfo {
     }
   }
 
-  $RequiresAdmin = Test-ActualInstallerBooleanValue -Value (Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('Admin', 'RunAsAdmin')) -Default ($RequestedExecutionLevel -eq 'requireAdministrator')
+  $RequiresAdmin = Test-ActualInstallerBooleanValue -Value (Get-DictionaryValue -Dictionary $Setup -Name @('Admin', 'RunAsAdmin')) -Default ($RequestedExecutionLevel -eq 'requireAdministrator')
   if ($RequiresAdmin -or $RequestedExecutionLevel -eq 'requireAdministrator') { return [pscustomobject]@{ Scope = 'machine'; SupportedScopes = @('machine'); DefaultScope = 'machine'; InstallLevel = $null; ScopeSwitches = $null } }
   return [pscustomobject]@{ Scope = 'user'; SupportedScopes = @('user'); DefaultScope = 'user'; InstallLevel = $null; ScopeSwitches = $null }
 }
@@ -822,8 +787,8 @@ function Get-ActualInstallerDefaultInstallLocation {
   [OutputType([string])]
   param ([Parameter(Mandatory)][Collections.IDictionary]$Setup, [Parameter(Mandatory)][psobject]$ScopeInfo, [Nullable[bool]]$Is64Bit)
 
-  $Primary = [string](Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('InstallDir', 'InstallationPath'))
-  $Alternate = [string](Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('AltInstallDir', 'AlternateInstallationPath'))
+  $Primary = [string](Get-DictionaryValue -Dictionary $Setup -Name @('InstallDir', 'InstallationPath'))
+  $Alternate = [string](Get-DictionaryValue -Dictionary $Setup -Name @('AltInstallDir', 'AlternateInstallationPath'))
   $Candidate = $Primary
   if ($Alternate) {
     if ($ScopeInfo.DefaultScope -eq 'user' -and $Primary -notmatch '(?i)<(?:Local)?AppData>' -and $Alternate -match '(?i)<(?:Local)?AppData>') { $Candidate = $Alternate }
@@ -1653,7 +1618,7 @@ function Open-ActualInstallerCompanionContext {
   )
 
   $Setup = $Layout.Configuration['Setup']
-  $ExpectedName = [string](Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('DataFileName'))
+  $ExpectedName = [string](Get-DictionaryValue -Dictionary $Setup -Name @('DataFileName'))
   if ([string]::IsNullOrWhiteSpace($ExpectedName)) { throw 'The Actual Installer configuration does not declare a Setup EXE + Data companion file.' }
   $ResolvedCompanion = Resolve-InstallerFileSystemPath -Path $CompanionFile -PathType Leaf
   $CompanionLength = (Get-Item -LiteralPath $ResolvedCompanion -Force).Length
@@ -1664,7 +1629,7 @@ function Open-ActualInstallerCompanionContext {
     }
   }
   [long]$ExpectedLength = 0
-  $RawExpectedLength = Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('DataFileSize')
+  $RawExpectedLength = Get-DictionaryValue -Dictionary $Setup -Name @('DataFileSize')
   if ($null -ne $RawExpectedLength -and [long]::TryParse([string]$RawExpectedLength, [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$ExpectedLength) -and $ExpectedLength -gt 0 -and $CompanionLength -ne $ExpectedLength) {
     throw "The supplied companion file length $CompanionLength does not match compiled DataFileSize $ExpectedLength."
   }
@@ -1915,9 +1880,9 @@ function Get-ActualInstallerLayout {
   $Route = Get-ActualInstallerRoute -Containers $Containers -MetadataContainer $MetadataContainer -MetadataEntryName $MetadataEntryName
   $Configuration = Read-ActualInstallerConfiguration -Path $File.FullName -Container $MetadataContainer -EntryName $MetadataEntryName
   $Setup = $Configuration['Setup']
-  if ($null -eq $Setup -or [string]::IsNullOrWhiteSpace([string](Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('AppName')))) { throw 'The Actual Installer configuration does not contain a valid [Setup] product identity.' }
+  if ($null -eq $Setup -or [string]::IsNullOrWhiteSpace([string](Get-DictionaryValue -Dictionary $Setup -Name @('AppName')))) { throw 'The Actual Installer configuration does not contain a valid [Setup] product identity.' }
   $FileRecords = @(Get-ActualInstallerFileRecord -FilesSection $Configuration['Files'] -Route $Route)
-  $CompanionDataFile = [string](Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('DataFileName'))
+  $CompanionDataFile = [string](Get-DictionaryValue -Dictionary $Setup -Name @('DataFileName'))
   if ($FileRecords.Count -eq 0 -and [string]::IsNullOrWhiteSpace($CompanionDataFile)) { throw 'The Actual Installer configuration does not contain a supported [Files] table or companion data file.' }
   if ($Route.PayloadEncoding -eq 'ExternalSevenZip' -and [string]::IsNullOrWhiteSpace($CompanionDataFile)) { throw 'The metadata-only Actual Installer route does not declare a companion data file.' }
   $PayloadCatalog = @(Get-ActualInstallerPayloadCatalog -Route $Route -Containers $Containers -MetadataContainer $MetadataContainer -FileRecords $FileRecords)
@@ -1958,13 +1923,13 @@ function Get-ActualInstallerInfo {
       $Diagnostics.Add((New-InstallerDiagnostic -Id 'ActualInstaller.Architecture.UnknownConfiguration' -Source ActualInstaller -Message "The compiled architecture value '$($ArchitectureConfiguration.ConfigurationValue)' under '$($ArchitectureConfiguration.ConfigurationKey)' is not a recognized Actual Installer layout value." -Kind Incomplete -Areas Metadata -AffectedFields Architecture))
     }
 
-    $DisplayVersion = [string](Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('AppVersion'))
+    $DisplayVersion = [string](Get-DictionaryValue -Dictionary $Setup -Name @('AppVersion'))
     if ($DisplayVersion -match '^<[^>]+>$') {
       $Diagnostics.Add((New-InstallerDiagnostic -Id 'ActualInstaller.Metadata.DynamicVersion' -Source 'ActualInstaller' -Message "The Actual Installer AppVersion '$DisplayVersion' is a runtime expression and is not static product-version evidence." -Kind Incomplete -Areas Metadata -AffectedFields DisplayVersion))
       $null = $Unresolved.Add('DisplayVersion')
       $DisplayVersion = $null
     }
-    $BuilderVersion = [string](Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('AIVer', 'Version'))
+    $BuilderVersion = [string](Get-DictionaryValue -Dictionary $Setup -Name @('AIVer', 'Version'))
     if ([string]::IsNullOrWhiteSpace($BuilderVersion)) { try { $BuilderVersion = [string](Read-ProductVersionRawFromExe -Path $Layout.Path) } catch { $BuilderVersion = $null } }
     [int]$BuilderMajor = 0
     if ($BuilderVersion -match '^(?<Major>\d+)') { $BuilderMajor = [int]$Matches.Major }
@@ -1972,14 +1937,14 @@ function Get-ActualInstallerInfo {
       $Diagnostics.Add((New-InstallerDiagnostic -Id 'ActualInstaller.Format.VersionRouteMismatch' -Source 'ActualInstaller' -Message "Actual Installer builder version '$BuilderVersion' conflicts with structural route '$($Layout.Route.Id)'; the structural route remains authoritative." -Kind Mismatch -Areas Detection, Metadata -Evidence ([ordered]@{ BuilderVersion = $BuilderVersion; Route = $Layout.Route.Id })))
     }
 
-    $DisplayName = [string](Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('AppName'))
-    $Publisher = [string](Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('CompanyName', 'Publisher'))
-    $MainExecutable = [string](Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('MainExecutable', 'MainExe'))
-    $UninstallValue = Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('Uninstall')
+    $DisplayName = [string](Get-DictionaryValue -Dictionary $Setup -Name @('AppName'))
+    $Publisher = [string](Get-DictionaryValue -Dictionary $Setup -Name @('CompanyName', 'Publisher'))
+    $MainExecutable = [string](Get-DictionaryValue -Dictionary $Setup -Name @('MainExecutable', 'MainExe'))
+    $UninstallValue = Get-DictionaryValue -Dictionary $Setup -Name @('Uninstall')
     $UninstallEnabled = Test-ActualInstallerBooleanValue -Value $UninstallValue -Default $true
-    $ShowValue = Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('ShowAddRemove', 'ShowInAddRemovePrograms')
+    $ShowValue = Get-DictionaryValue -Dictionary $Setup -Name @('ShowAddRemove', 'ShowInAddRemovePrograms')
     $WritesBuiltInAppsAndFeaturesEntry = $UninstallEnabled -and (Test-ActualInstallerBooleanValue -Value $ShowValue -Default $UninstallEnabled)
-    $Guid = [string](Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('GUID', 'Guid', 'ProductGUID'))
+    $Guid = [string](Get-DictionaryValue -Dictionary $Setup -Name @('GUID', 'Guid', 'ProductGUID'))
     if ($Guid -notmatch '^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}$') { $Guid = $null }
     # The Cabinet4 runtime predates Product GUID storage. VM validation of the
     # official 4.8 builder media proves that it uses AppName verbatim as the
@@ -2026,7 +1991,7 @@ function Get-ActualInstallerInfo {
       $Diagnostics.Add((New-InstallerDiagnostic -Id 'ActualInstaller.Extraction.RuntimeDownload' -Source ActualInstaller -Message "$($MediaInfo.ExternalDownloads.Count) payload download(s) are performed by compiled commands at installation time and are not fetched by static parsing." -Kind Incomplete -Areas Extraction, Installability -Evidence ([ordered]@{ Urls = @($MediaInfo.ExternalDownloads.Url) })))
     }
     $CustomAppsAndFeaturesEvidence = @(Get-ActualInstallerCustomAppsAndFeaturesEntry -RegistryWrite $RegistryWrites)
-    $Uninstaller = [string](Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('UninstallFile', 'UninstallFileName', 'Uninstaller'))
+    $Uninstaller = [string](Get-DictionaryValue -Dictionary $Setup -Name @('UninstallFile', 'UninstallFileName', 'Uninstaller'))
     if ($UninstallEnabled -and [string]::IsNullOrWhiteSpace($Uninstaller)) { $Uninstaller = 'Uninstall.exe' }
     $DisplayIcon = Join-ActualInstallerManifestPath -BasePath $DefaultInstallLocation -ChildPath $MainExecutable
     $UninstallString = Join-ActualInstallerManifestPath -BasePath $DefaultInstallLocation -ChildPath $Uninstaller
@@ -2111,7 +2076,7 @@ function Get-ActualInstallerInfo {
       DefaultInstallLocation = $DefaultInstallLocation; WritesAppsAndFeaturesEntry = $WritesAppsAndFeaturesEntry; AppsAndFeaturesProductCode = $ProductCode; AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry ? 'exe' : $null
       Diagnostics = @(Merge-InstallerDiagnostics -Diagnostic $Diagnostics.ToArray()); UnresolvedFields = [string[]]@($Unresolved | Sort-Object); Family = 'Actual Installer'; FormatGeneration = $Layout.Route.Id; ContainerRoute = $Layout.Route.Container; BuilderVersion = $BuilderVersion
       Configuration = $Layout.Configuration; PayloadCatalog = $PublicPayloadCatalog; CompanionPayloadCatalog = $CompanionPayloadCatalog; InstalledPayloadCatalog = $InstalledPayloadCatalog; EmbeddedContainers = @($Layout.Containers | ForEach-Object { [pscustomobject]@{ Type = $_.Type; Offset = $_.Offset; Length = $_.Length; Entries = @($_.Entries) } })
-      PublisherUrl = Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('WebSite', 'PublisherUrl'); SupportUrl = Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('SupportLink', 'SupportUrl')
+      PublisherUrl = Get-DictionaryValue -Dictionary $Setup -Name @('WebSite', 'PublisherUrl'); SupportUrl = Get-DictionaryValue -Dictionary $Setup -Name @('SupportLink', 'SupportUrl')
       MainExecutable = $MainExecutable; Uninstaller = $Uninstaller; UninstallString = $UninstallString; QuietUninstallString = $QuietUninstallString; UninstallerCommandEvidence = $UninstallerCommandEvidence; DisplayIcon = $DisplayIcon; AppsAndFeaturesEntries = $AppsAndFeaturesEntries; BuiltInAppsAndFeaturesEntry = $BuiltInAppsAndFeaturesEntry; CustomAppsAndFeaturesEvidence = $CustomAppsAndFeaturesEvidence
       RegistryHive = $RegistryHive; RegistryView = $RegistryView; SupportedScopes = [string[]]$ScopeInfo.SupportedScopes; DefaultScope = $ScopeInfo.DefaultScope; ScopeSwitches = $ScopeInfo.ScopeSwitches; InstallLevel = $ScopeInfo.InstallLevel
       RequestedExecutionLevel = $RequestedExecutionLevel; ElevationRequirement = $ElevationRequirement; InstallerSwitches = $InstallerSwitches; InstallModes = $InstallModes; InstallerSuccessCodes = @()
@@ -2205,8 +2170,8 @@ function Expand-ActualInstallerInstaller {
       # bytes unchanged. Materialize only outputs explicitly marked ExactCopy;
       # updater helpers and unverified generations remain metadata evidence.
       $Setup = $Layout.Configuration['Setup']
-      $UninstallEnabled = Test-ActualInstallerBooleanValue -Value (Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('Uninstall')) -Default $true
-      $Uninstaller = [string](Get-ActualInstallerDictionaryValue -Dictionary $Setup -Name @('UninstallFile', 'UninstallFileName', 'Uninstaller'))
+      $UninstallEnabled = Test-ActualInstallerBooleanValue -Value (Get-DictionaryValue -Dictionary $Setup -Name @('Uninstall')) -Default $true
+      $Uninstaller = [string](Get-DictionaryValue -Dictionary $Setup -Name @('UninstallFile', 'UninstallFileName', 'Uninstaller'))
       if ($UninstallEnabled -and [string]::IsNullOrWhiteSpace($Uninstaller)) { $Uninstaller = 'Uninstall.exe' }
       $GeneratedSelection = [Collections.Generic.List[object]]::new()
       foreach ($Generated in @(Get-ActualInstallerGeneratedOutputInfo -Layout $Layout -Uninstaller $Uninstaller -UninstallEnabled $UninstallEnabled | Where-Object { $_.CanReconstruct -and $_.ReconstructionMode -eq 'ExactCopy' -and (Test-ExtractionPattern -Path $_.RelativePath -Pattern $Pattern) })) {
@@ -2219,7 +2184,7 @@ function Expand-ActualInstallerInstaller {
       if ($GeneratedSelection.Count -gt 0) {
         foreach ($File in @(Export-ActualInstallerContainerSelection -Layout $Layout -Container $Layout.MetadataContainer -Selection $GeneratedSelection.ToArray() -MaximumExpandedBytes $MaximumExpandedBytes)) { $Results.Add($File) }
       }
-      $CompanionDataFile = [string](Get-ActualInstallerDictionaryValue -Dictionary $Layout.Configuration['Setup'] -Name @('DataFileName'))
+      $CompanionDataFile = [string](Get-DictionaryValue -Dictionary $Layout.Configuration['Setup'] -Name @('DataFileName'))
       if (-not [string]::IsNullOrWhiteSpace($CompanionDataFile)) {
         if (-not $PSBoundParameters.ContainsKey('CompanionFile') -or [string]::IsNullOrWhiteSpace($CompanionFile)) { throw "Actual Installer extraction requires companion data file '$CompanionDataFile'." }
         foreach ($File in @(Export-ActualInstallerCompanionData -Layout $Layout -CompanionFile $CompanionFile -DestinationPath $DestinationPath -Name $Pattern -CollisionAction $CollisionAction -MaximumExpandedBytes ($MaximumExpandedBytes - $ExpandedBytes) -ReservedPath $ReservedPaths)) {
