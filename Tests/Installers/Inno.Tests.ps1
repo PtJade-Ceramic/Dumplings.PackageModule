@@ -63,6 +63,24 @@ Describe 'Inno bridge' {
     Test-InnoAppsAndFeaturesEntry -Path $Fixture | Should -BeTrue
   }
 
+  It 'Should propagate required x64-only constant compatibility through the bridge' {
+    $Fixture = Resolve-DumplingsTestFixturePath -RelativePath 'Installers\Inno\ProWare.AmortizationPlus\1.0.0.0\ap_setup.exe'
+    if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
+      Set-ItResult -Skipped -Because 'The optional ProWare Amortization Plus fixture is not cached.'
+      return
+    }
+    (Get-FileHash -LiteralPath $Fixture -Algorithm SHA256).Hash | Should -Be '22C8B9FF5A528D1EBC2D604765AD2BD9EDFB2D577073B3CEDEEC561600135010'
+
+    $Info = Get-InnoInfo -Path $Fixture
+
+    $Info.SupportedArchitectures | Should -Be @('x64', 'arm64')
+    $Info.UnsupportedArchitectures | Should -Be @('x86')
+    $Info.RequiredArchitectureConstants | Should -Be @('commonpf64')
+    Read-UnsupportedArchitecturesFromInno -Path $Fixture | Should -Be @('x86')
+    Test-InnoUnsupportedArchitecture -Path $Fixture -Architecture x86 | Should -BeTrue
+    Test-InnoUnsupportedArchitecture -Path $Fixture -Architecture x64 | Should -BeFalse
+  }
+
   It 'Should detect a default-user dual-scope Inno installer through the bridge' {
     $Fixture = Get-InstallerFixture -Name 'loot_0.26.0-win64.exe' -Url 'https://github.com/loot/loot/releases/download/0.26.0/loot_0.26.0-win64.exe'
     $Info = Get-InnoInfo -Path $Fixture
