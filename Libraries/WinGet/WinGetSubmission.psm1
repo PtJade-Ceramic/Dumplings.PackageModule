@@ -849,7 +849,26 @@ function Send-WinGetManifest {
     }
     # The body always records the issues, one reference per line, for a human reading the pull request.
     if ($ResolvedIssueReferences) { $NewPullRequestBody += "`n`n$($ResolvedIssueReferences -join "`n")" }
-    $NewPullRequest = New-WinGetGitHubPullRequest -Title $NewCommitName -Body $NewPullRequestBody -Head "${OriginRepoOwner}:${NewBranchName}" -Base $UpstreamRepoBranch -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName
+    try {
+      $NewPullRequest = New-WinGetGitHubPullRequest -Title $NewCommitName -Body $NewPullRequestBody -Head "${OriginRepoOwner}:${NewBranchName}" -Base $UpstreamRepoBranch -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName
+    } catch {
+      # The uploaded branch only has a purpose while a pull request refers to
+      # it. A rejected request can still have created the pull request, and
+      # GitHub reports a duplicate head as an error, so the branch is removed
+      # only when no pull request in any state uses it as its head.
+      $PullRequestCreationFailure = $_
+      $HeadIsUnused = $false
+      try {
+        $HeadIsUnused = @(Get-WinGetGitHubPullRequestForHead -HeadOwner $OriginRepoOwner -HeadBranch $NewBranchName -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName).Count -eq 0
+      } catch {
+        $Task.Log("Failed to check whether any pull request uses the candidate branch ${OriginRepoOwner}:${NewBranchName}. The branch is kept: ${_}", 'Warning')
+      }
+      if ($HeadIsUnused) {
+        $Task.Log("No pull request uses the candidate branch ${OriginRepoOwner}:${NewBranchName} after the creation failure. Removing the unused branch.", 'Info')
+        Invoke-WinGetSubmissionCandidateBranchCleanup -Task $Task -BranchName $NewBranchName -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName
+      }
+      throw $PullRequestCreationFailure
+    }
     $Task.Log("Pull request created: $($NewPullRequest.title) - $($NewPullRequest.html_url)", 'Info')
 
     # GitHub search can continue returning an item briefly after it is closed.
