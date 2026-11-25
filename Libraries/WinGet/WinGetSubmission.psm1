@@ -680,6 +680,22 @@ function Send-WinGetManifest {
     $NewManifests = $NewManifest | ConvertTo-WinGetManifestYaml
     #endregion
 
+    #region Resolve replaced localizations
+    # Locale documents are inherited from the reference and can only be changed, so an authored
+    # set that no longer declares a published locale means the task replaced that locale, for
+    # example to correct its tag. The upload below is additive, so the replaced file has to be
+    # deleted in the same commit instead of surviving beside its replacement.
+    $ReplacedLocalePath = @()
+    if (-not $PackageIsMissing -and -not $PendingReference -and $PublishedPackageVersion -ceq $NewPackageVersion) {
+      $ReplacedLocalePath = @(
+        @([string]$PublishedManifest.DefaultLocalization['PackageLocale']) + @($PublishedManifest.Localizations | ForEach-Object -Process { [string]$_['PackageLocale'] }) |
+          Where-Object -FilterScript { -not [string]::IsNullOrWhiteSpace($_) -and $_ -cnotin @(if ($NewManifests['Locale']) { $NewManifests['Locale'].Keys }) } |
+          ForEach-Object -Process { Get-WinGetGitHubPackagePath -PackageIdentifier $NewPackageIdentifier -PackageVersion $NewPackageVersion -ManifestType 'locale' -Locale $_ -RootPath $RootPath }
+      )
+      foreach ($Path in $ReplacedLocalePath) { $Task.Log("Removing the replaced localization manifest ${Path}", 'Info') }
+    }
+    #endregion
+
     # Validate manifests using WinGet client
     $null = $NewManifests | Add-WinGetLocalManifests -PackageIdentifier $NewPackageIdentifier -Path $NewManifestsPath
     Test-WinGetManifest -Path $NewManifestsPath
@@ -760,7 +776,7 @@ function Send-WinGetManifest {
     }
 
     # Upload new manifests
-    $NewCommitSha = Add-WinGetGitHubManifests -PackageIdentifier $NewPackageIdentifier -PackageVersion $NewPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $NewBranchName -RepoSha $NewBranch.object.sha -RootPath $RootPath -Manifest $NewManifests -CommitMessage $NewCommitName
+    $NewCommitSha = Add-WinGetGitHubManifests -PackageIdentifier $NewPackageIdentifier -PackageVersion $NewPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $NewBranchName -RepoSha $NewBranch.object.sha -RootPath $RootPath -Manifest $NewManifests -RemovePath $ReplacedLocalePath -CommitMessage $NewCommitName
 
     #region Remove old manifests
     # Remove old manifests, if

@@ -778,6 +778,38 @@ Describe 'Send-WinGetManifest comparison failure policy' -Tag Unit {
     Should -Invoke New-WinGetGitHubBranch -ModuleName WinGetSubmission -Exactly 1 -ParameterFilter { $SourceSha -eq ('a' * 40) }
   }
 
+  It 'deletes the published localization file its authored replacement no longer declares' {
+    Mock Get-WinGetGitHubPackageVersion -ModuleName WinGetSubmission { '2.0' }
+    Mock ConvertFrom-WinGetManifestYaml -ModuleName WinGetSubmission {
+      @{
+        Installers          = @()
+        DefaultLocalization = [ordered]@{ PackageLocale = 'en-US' }
+        Localizations       = @([ordered]@{ PackageLocale = 'en-US' }, [ordered]@{ PackageLocale = 'fr' })
+      }
+    }
+    Mock ConvertTo-WinGetManifestYaml -ModuleName WinGetSubmission {
+      @{ Version = 'candidate manifest'; Installer = 'candidate installer'; Locale = [ordered]@{ 'en-US' = 'a'; 'fr-FR' = 'b' } }
+    }
+
+    Send-WinGetManifest -Task $Script:SubmissionTask
+
+    Should -Invoke Add-WinGetGitHubManifests -ModuleName WinGetSubmission -Exactly 1 -ParameterFilter {
+      @($RemovePath).Count -eq 1 -and $RemovePath[0] -ceq 'manifests/v/Vendor/Package/2.0/Vendor.Package.locale.fr.yaml'
+    }
+    $Script:SubmissionTask.Logs.Message | Should -Contain 'Removing the replaced localization manifest manifests/v/Vendor/Package/2.0/Vendor.Package.locale.fr.yaml'
+  }
+
+  It 'deletes nothing when the submission writes a version the repository does not publish' {
+    Mock ConvertTo-WinGetManifestYaml -ModuleName WinGetSubmission {
+      @{ Version = 'candidate manifest'; Installer = 'candidate installer'; Locale = [ordered]@{ 'en-US' = 'a' } }
+    }
+
+    Send-WinGetManifest -Task $Script:SubmissionTask
+
+    Should -Invoke Add-WinGetGitHubManifests -ModuleName WinGetSubmission -Exactly 1 -ParameterFilter { @($RemovePath).Count -eq 0 }
+    @($Script:SubmissionTask.Logs.Message | Where-Object -FilterScript { $_ -like 'Removing the replaced localization manifest*' }) | Should -BeNullOrEmpty
+  }
+
   AfterAll {
     if ($Script:SavedPreference) { $Global:DumplingsPreference = $Script:SavedPreference.Value }
     else { Remove-Variable -Name DumplingsPreference -Scope Global -ErrorAction Ignore }
